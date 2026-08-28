@@ -1,10 +1,13 @@
 from django.urls import path
 
 from .sales_agents import PublicSalesAgentsView
+from .ops_mode_views import OpsModeStatusView, RequestOpsModeChangeView
 from .views import BillingMeView, PublicPricingView, SignupRegistrationStatusView, SubmitTenantPaymentView
 
 urlpatterns = [
     path("me/", BillingMeView.as_view(), name="billing-me"),
+    path("ops-mode/", OpsModeStatusView.as_view(), name="ops-mode-status"),
+    path("ops-mode/request/", RequestOpsModeChangeView.as_view(), name="ops-mode-request"),
     path("sales-agents/", PublicSalesAgentsView.as_view(), name="billing-sales-agents"),
     path("pricing/", PublicPricingView.as_view(), name="billing-pricing"),
     path("submit-payment/", SubmitTenantPaymentView.as_view(), name="billing-submit"),

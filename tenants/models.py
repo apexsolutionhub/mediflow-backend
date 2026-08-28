@@ -154,3 +154,58 @@ class SalesAgent(models.Model):
 
     def __str__(self):
         return self.display_name
+
+
+class TenantOpsModeChangeRequest(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_APPROVED = "approved"
+    STATUS_REJECTED = "rejected"
+    STATUS_CANCELLED = "cancelled"
+    STATUS_APPLIED = "applied"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+        (STATUS_CANCELLED, "Cancelled"),
+        (STATUS_APPLIED, "Applied"),
+    ]
+
+    clinic_tin = models.CharField(max_length=50, db_index=True)
+    current_ops_mode = models.CharField(max_length=20)
+    requested_ops_mode = models.CharField(max_length=20)
+    request_note = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+        db_index=True,
+    )
+    requested_by_username = models.CharField(max_length=150, blank=True, default="")
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="ops_mode_requests_submitted",
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="ops_mode_requests_reviewed",
+    )
+    review_note = models.TextField(blank=True, default="")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    applied_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["clinic_tin", "status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.clinic_tin} {self.current_ops_mode}→{self.requested_ops_mode} ({self.status})"
