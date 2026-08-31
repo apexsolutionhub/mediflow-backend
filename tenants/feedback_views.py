@@ -85,8 +85,9 @@ class ClinicFeedbackSendView(APIView):
             return Response({"detail": "Clinic account not found."}, status=404)
 
         body = (request.data.get("body") or "").strip()
-        if not body:
-            return Response({"detail": "Message body is required."}, status=400)
+        image_url = (request.data.get("image_url") or "").strip()
+        if not body and not image_url:
+            return Response({"detail": "Message body or image is required."}, status=400)
 
         thread, _ = TenantFeedbackThread.objects.get_or_create(pharmacy_tin=tin)
         if thread.status == TenantFeedbackThread.STATUS_CLOSED:
@@ -98,7 +99,7 @@ class ClinicFeedbackSendView(APIView):
             thread=thread,
             sender_side=TenantFeedbackMessage.SIDE_TENANT,
             body=body,
-            image_url=(request.data.get("image_url") or "").strip(),
+            image_url=image_url,
             sender_username=request.user.username,
             read_by_tenant=True,
             read_by_apex=False,
