@@ -1,6 +1,6 @@
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
+from django.db import models, transaction
 
 from api.models import UserProfile
 from clinic.models import (
@@ -58,6 +58,12 @@ class Command(BaseCommand):
         keep_user_ids = list(
             UserProfile.objects.filter(clinic_tin=apex_tin).values_list("user_id", flat=True)
         )
+        staff_user_ids = list(
+            User.objects.filter(is_active=True)
+            .filter(models.Q(is_staff=True) | models.Q(is_superuser=True))
+            .values_list("id", flat=True)
+        )
+        keep_user_ids = list(set(keep_user_ids) | set(staff_user_ids))
         if not keep_user_ids:
             raise CommandError(f"No staff users found for clinic TIN {apex_tin}.")
 
