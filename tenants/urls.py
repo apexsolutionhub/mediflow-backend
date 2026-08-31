@@ -5,6 +5,11 @@ from .resubmit_setup_view import ResubmitSetupPaymentView
 from .signup_status_view import SignupRegistrationStatusView
 from .sales_agents import PublicSalesAgentsView
 from .ops_mode_views import OpsModeStatusView, RequestOpsModeChangeView
+from .feedback_views import (
+    ClinicFeedbackSendView,
+    ClinicFeedbackThreadView,
+    ClinicFeedbackUnreadView,
+)
 from .views import BillingMeView, PublicPricingView, SubmitTenantPaymentView
 
 urlpatterns = [
@@ -18,4 +23,7 @@ urlpatterns = [
     path("resubmit-setup/", ResubmitSetupPaymentView.as_view(), name="billing-resubmit-setup"),
     path("renewal-status/", RenewalStatusView.as_view(), name="billing-renewal-status"),
     path("resubmit-quarterly/", ResubmitQuarterlyPaymentView.as_view(), name="billing-resubmit-quarterly"),
+    path("feedback/", ClinicFeedbackThreadView.as_view(), name="billing-feedback-thread"),
+    path("feedback/unread/", ClinicFeedbackUnreadView.as_view(), name="billing-feedback-unread"),
+    path("feedback/send/", ClinicFeedbackSendView.as_view(), name="billing-feedback-send"),
 ]

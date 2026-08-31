@@ -233,3 +233,53 @@ class SubscriptionPricingRule(models.Model):
 
     def __str__(self):
         return f"{self.business_type} [{self.modules_key}]"
+
+
+class TenantFeedbackThread(models.Model):
+    """Shared Apex chat thread table (managed by mediflow_admin migrations)."""
+
+    STATUS_OPEN = "open"
+    STATUS_CLOSED = "closed"
+
+    pharmacy_tin = models.CharField(max_length=50, unique=True, db_index=True)
+    status = models.CharField(max_length=20, default=STATUS_OPEN, db_index=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    closed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "tenants_tenantfeedbackthread"
+        ordering = ["-updated_at"]
+
+
+class TenantFeedbackMessage(models.Model):
+    """Shared Apex chat message table (managed by mediflow_admin migrations)."""
+
+    SIDE_TENANT = "tenant"
+    SIDE_APEX = "apex"
+
+    thread = models.ForeignKey(
+        TenantFeedbackThread,
+        on_delete=models.CASCADE,
+        related_name="messages",
+    )
+    sender_side = models.CharField(max_length=20)
+    body = models.TextField()
+    image_url = models.URLField(blank=True, default="")
+    sender_username = models.CharField(max_length=150, blank=True, default="")
+    read_by_tenant = models.BooleanField(default=False)
+    read_by_apex = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        managed = False
+        db_table = "tenants_tenantfeedbackmessage"
+        ordering = ["created_at"]
