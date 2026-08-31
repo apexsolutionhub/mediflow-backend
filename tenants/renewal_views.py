@@ -119,6 +119,18 @@ class ResubmitQuarterlyPaymentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if tenant.is_illustration:
+            return Response(
+                {
+                    "status": "exempt",
+                    "is_illustration": True,
+                    "clinic_name": tenant.clinic_name,
+                    "clinic_tin": tenant.clinic_tin,
+                    "quarterly_fee_etb": tenant.quarterly_fee_etb,
+                    "detail": "Illustration tenant — no quarterly billing.",
+                }
+            )
+
         if tenant.subscription_payment_approved:
             return Response(
                 {

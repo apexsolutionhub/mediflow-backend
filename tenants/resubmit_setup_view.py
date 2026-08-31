@@ -53,6 +53,18 @@ class ResubmitSetupPaymentView(APIView):
                 }
             )
 
+        if tenant.is_illustration:
+            return Response(
+                {
+                    "status": "exempt",
+                    "is_illustration": True,
+                    "clinic_name": tenant.clinic_name,
+                    "clinic_tin": tenant.clinic_tin,
+                    "setup_fee_etb": tenant.setup_fee_etb,
+                    "detail": "Illustration tenant — no setup resubmit required.",
+                }
+            )
+
         latest = (
             TenantPaymentSubmission.objects.filter(
                 clinic_tin=tin,

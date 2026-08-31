@@ -209,3 +209,27 @@ class TenantOpsModeChangeRequest(models.Model):
 
     def __str__(self):
         return f"{self.clinic_tin} {self.current_ops_mode}→{self.requested_ops_mode} ({self.status})"
+
+
+class SubscriptionPricingRule(models.Model):
+    """Shared pricing catalog table (managed by mediflow_admin migrations)."""
+
+    business_type = models.CharField(max_length=64, db_index=True)
+    modules_key = models.CharField(max_length=255, db_index=True)
+    modules = models.JSONField(default=list, blank=True)
+    setup_fee_etb = models.PositiveIntegerField(default=15000)
+    quarterly_fee_etb = models.PositiveIntegerField(default=5000)
+    yearly_fee_etb = models.PositiveIntegerField(default=0)
+    description = models.CharField(max_length=255, blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "tenants_subscriptionpricingrule"
+        ordering = ["sort_order", "business_type", "modules_key"]
+
+    def __str__(self):
+        return f"{self.business_type} [{self.modules_key}]"

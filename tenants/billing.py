@@ -23,12 +23,9 @@ PAYMENT_CHANNELS = (
 
 
 def catalog_default_fees() -> dict:
-    return {
-        "setup_fee_etb": DEFAULT_SETUP_FEE_ETB,
-        "quarterly_fee_etb": DEFAULT_QUARTERLY_FEE_ETB,
-        "source": "catalog",
-        "description": "MediFlow clinic plan — all roles, billed quarterly.",
-    }
+    from .pricing import catalog_default_fees as resolve_catalog_fees
+
+    return resolve_catalog_fees()
 
 
 @dataclass

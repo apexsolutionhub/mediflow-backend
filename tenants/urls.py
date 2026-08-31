@@ -2,9 +2,10 @@ from django.urls import path
 
 from .renewal_views import RenewalStatusView, ResubmitQuarterlyPaymentView
 from .resubmit_setup_view import ResubmitSetupPaymentView
+from .signup_status_view import SignupRegistrationStatusView
 from .sales_agents import PublicSalesAgentsView
 from .ops_mode_views import OpsModeStatusView, RequestOpsModeChangeView
-from .views import BillingMeView, PublicPricingView, SignupRegistrationStatusView, SubmitTenantPaymentView
+from .views import BillingMeView, PublicPricingView, SubmitTenantPaymentView
 
 urlpatterns = [
     path("me/", BillingMeView.as_view(), name="billing-me"),
