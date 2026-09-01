@@ -45,6 +45,17 @@ class SignupRegistrationStatusView(APIView):
                 }
             )
 
+        if getattr(tenant, "provisioned_by_apex", False):
+            return Response(
+                {
+                    "status": "approved",
+                    "clinic_name": tenant.clinic_name,
+                    "clinic_tin": tenant.clinic_tin,
+                    "setup_fee_etb": tenant.setup_fee_etb,
+                    "provisioned_by_apex": True,
+                }
+            )
+
         if tenant.setup_fee_approved or int(tenant.setup_fee_etb or 0) <= 0:
             return Response(
                 {
