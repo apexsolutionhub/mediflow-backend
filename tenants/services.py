@@ -2,8 +2,9 @@ from datetime import timedelta
 
 from django.utils import timezone
 
-from .billing import TRIAL_DAYS, catalog_default_fees
+from .billing import TRIAL_DAYS
 from .models import TenantAccount
+from .pricing import catalog_default_fees, resolve_pricing_for_tenant
 
 
 def normalize_ops_mode(raw) -> str:
@@ -63,11 +64,14 @@ def ensure_tenant_account(
             tenant.ops_mode = mode
             dirty = True
         if not tenant.fees_manually_set and not tenant.setup_fee_approved:
-            if tenant.setup_fee_etb != fees["setup_fee_etb"]:
-                tenant.setup_fee_etb = fees["setup_fee_etb"]
+            catalog = resolve_pricing_for_tenant(tenant)
+            setup_fee = int(catalog.get("setup_fee_etb") or fees["setup_fee_etb"])
+            quarterly_fee = int(catalog.get("quarterly_fee_etb") or fees["quarterly_fee_etb"])
+            if tenant.setup_fee_etb != setup_fee:
+                tenant.setup_fee_etb = setup_fee
                 dirty = True
-            if tenant.quarterly_fee_etb != fees["quarterly_fee_etb"]:
-                tenant.quarterly_fee_etb = fees["quarterly_fee_etb"]
+            if tenant.quarterly_fee_etb != quarterly_fee:
+                tenant.quarterly_fee_etb = quarterly_fee
                 dirty = True
         if dirty:
             tenant.save()

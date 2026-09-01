@@ -11,7 +11,7 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .billing import create_payment_submission
+from .billing import create_payment_submission, effective_tenant_fees
 from .models import TenantAccount, TenantPaymentSubmission
 
 User = get_user_model()
@@ -43,13 +43,15 @@ class ResubmitSetupPaymentView(APIView):
         if not tenant:
             return Response({"detail": "Tenant not found."}, status=status.HTTP_404_NOT_FOUND)
 
+        setup_fee, _quarterly_fee = effective_tenant_fees(tenant)
+
         if tenant.setup_fee_approved:
             return Response(
                 {
                     "status": "approved",
                     "clinic_name": tenant.clinic_name,
                     "clinic_tin": tenant.clinic_tin,
-                    "setup_fee_etb": tenant.setup_fee_etb,
+                    "setup_fee_etb": setup_fee,
                 }
             )
 
@@ -60,7 +62,7 @@ class ResubmitSetupPaymentView(APIView):
                     "is_illustration": True,
                     "clinic_name": tenant.clinic_name,
                     "clinic_tin": tenant.clinic_tin,
-                    "setup_fee_etb": tenant.setup_fee_etb,
+                    "setup_fee_etb": setup_fee,
                     "detail": "Illustration tenant — no setup resubmit required.",
                 }
             )
@@ -80,7 +82,7 @@ class ResubmitSetupPaymentView(APIView):
                     "detail": "A setup payment is already awaiting Apex review.",
                     "clinic_name": tenant.clinic_name,
                     "clinic_tin": tenant.clinic_tin,
-                    "setup_fee_etb": tenant.setup_fee_etb,
+                    "setup_fee_etb": setup_fee,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -100,7 +102,7 @@ class ResubmitSetupPaymentView(APIView):
                 "status": "pending",
                 "clinic_name": tenant.clinic_name,
                 "clinic_tin": tenant.clinic_tin,
-                "setup_fee_etb": tenant.setup_fee_etb,
+                "setup_fee_etb": setup_fee,
                 "detail": "Payment details resubmitted. Awaiting Apex approval.",
             },
             status=status.HTTP_201_CREATED,

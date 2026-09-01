@@ -12,7 +12,7 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .billing import create_payment_submission
+from .billing import create_payment_submission, effective_tenant_fees
 from .models import TenantAccount, TenantPaymentSubmission
 
 User = get_user_model()
@@ -47,6 +47,8 @@ class RenewalStatusView(APIView):
         if not tenant:
             return Response({"status": "not_found", "detail": "Tenant not found."})
 
+        _setup_fee, quarterly_fee = effective_tenant_fees(tenant)
+
         if not tenant.setup_fee_approved:
             return Response(
                 {
@@ -61,7 +63,7 @@ class RenewalStatusView(APIView):
                     "status": "active",
                     "clinic_name": tenant.clinic_name,
                     "clinic_tin": tenant.clinic_tin,
-                    "quarterly_fee_etb": tenant.quarterly_fee_etb,
+                    "quarterly_fee_etb": quarterly_fee,
                 }
             )
 
@@ -72,7 +74,7 @@ class RenewalStatusView(APIView):
                     "status": "rejected",
                     "clinic_name": tenant.clinic_name,
                     "clinic_tin": tenant.clinic_tin,
-                    "quarterly_fee_etb": tenant.quarterly_fee_etb,
+                    "quarterly_fee_etb": quarterly_fee,
                     "rejection_reason": latest.rejection_reason,
                 }
             )
@@ -82,7 +84,7 @@ class RenewalStatusView(APIView):
                 "status": "pending",
                 "clinic_name": tenant.clinic_name,
                 "clinic_tin": tenant.clinic_tin,
-                "quarterly_fee_etb": tenant.quarterly_fee_etb,
+                "quarterly_fee_etb": quarterly_fee,
             }
         )
 
@@ -113,6 +115,8 @@ class ResubmitQuarterlyPaymentView(APIView):
         if not tenant:
             return Response({"detail": "Tenant not found."}, status=status.HTTP_404_NOT_FOUND)
 
+        _setup_fee, quarterly_fee = effective_tenant_fees(tenant)
+
         if not tenant.setup_fee_approved:
             return Response(
                 {"detail": "Clinic setup is not approved yet."},
@@ -126,7 +130,7 @@ class ResubmitQuarterlyPaymentView(APIView):
                     "is_illustration": True,
                     "clinic_name": tenant.clinic_name,
                     "clinic_tin": tenant.clinic_tin,
-                    "quarterly_fee_etb": tenant.quarterly_fee_etb,
+                    "quarterly_fee_etb": quarterly_fee,
                     "detail": "Illustration tenant — no quarterly billing.",
                 }
             )
@@ -137,7 +141,7 @@ class ResubmitQuarterlyPaymentView(APIView):
                     "status": "active",
                     "clinic_name": tenant.clinic_name,
                     "clinic_tin": tenant.clinic_tin,
-                    "quarterly_fee_etb": tenant.quarterly_fee_etb,
+                    "quarterly_fee_etb": quarterly_fee,
                 }
             )
 
@@ -149,7 +153,7 @@ class ResubmitQuarterlyPaymentView(APIView):
                     "detail": "A quarterly payment is already awaiting Apex review.",
                     "clinic_name": tenant.clinic_name,
                     "clinic_tin": tenant.clinic_tin,
-                    "quarterly_fee_etb": tenant.quarterly_fee_etb,
+                    "quarterly_fee_etb": quarterly_fee,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -166,7 +170,7 @@ class ResubmitQuarterlyPaymentView(APIView):
                 "status": "pending",
                 "clinic_name": tenant.clinic_name,
                 "clinic_tin": tenant.clinic_tin,
-                "quarterly_fee_etb": tenant.quarterly_fee_etb,
+                "quarterly_fee_etb": quarterly_fee,
                 "detail": "Quarterly payment resubmitted. Awaiting Apex approval.",
             },
             status=status.HTTP_201_CREATED,

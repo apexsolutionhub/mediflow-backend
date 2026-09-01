@@ -139,6 +139,24 @@ def compute_period_status(tenant: TenantAccount, *, now=None) -> str:
     return _quarterly_period_status(tenant, now=now)
 
 
+def _self_signup_setup_blocks_login(tenant: TenantAccount) -> bool:
+    if tenant.is_illustration or getattr(tenant, "provisioned_by_apex", False):
+        return False
+    setup_fee, _quarterly_fee = effective_tenant_fees(tenant)
+    return setup_fee > 0 and not tenant.setup_fee_approved
+
+
+def _latest_setup_submission(tenant: TenantAccount):
+    return (
+        TenantPaymentSubmission.objects.filter(
+            clinic_tin=tenant.clinic_tin,
+            payment_kind=TenantPaymentSubmission.KIND_SETUP,
+        )
+        .order_by("-submitted_at")
+        .first()
+    )
+
+
 def resolve_login_access(tenant: TenantAccount, *, role: str) -> AccessDecision:
     is_manager = (role or "").strip().lower() == "manager"
     period = compute_period_status(tenant)
@@ -159,6 +177,21 @@ def resolve_login_access(tenant: TenantAccount, *, role: str) -> AccessDecision:
         )
 
     if period in {"exempt", "trial", "trial_ending", "active", "warning"}:
+        if _self_signup_setup_blocks_login(tenant):
+            latest = _latest_setup_submission(tenant)
+            if latest and latest.status == TenantPaymentSubmission.STATUS_REJECTED:
+                return AccessDecision(
+                    "denied",
+                    TenantPaymentSubmission.KIND_SETUP,
+                    period,
+                    "Setup payment was rejected.",
+                )
+            return AccessDecision(
+                "denied",
+                TenantPaymentSubmission.KIND_SETUP,
+                "setup_pending",
+                "Setup payment is awaiting Apex approval.",
+            )
         return AccessDecision("full", None, period)
 
     if period == "setup_pending":
@@ -218,11 +251,8 @@ def create_payment_submission(
     if len(ref) < 4:
         raise ValueError("Transaction reference must be at least 4 characters.")
 
-    amount = (
-        int(tenant.setup_fee_etb or 0)
-        if kind == TenantPaymentSubmission.KIND_SETUP
-        else int(tenant.quarterly_fee_etb or 0)
-    )
+    setup_fee, quarterly_fee = effective_tenant_fees(tenant)
+    amount = setup_fee if kind == TenantPaymentSubmission.KIND_SETUP else quarterly_fee
     if amount <= 0:
         raise ValueError("No fee configured for this payment kind.")
 
@@ -358,8 +388,11 @@ def effective_tenant_fees(tenant: TenantAccount) -> tuple[int, int]:
     """Catalog fees unless Apex manually locked this tenant's pricing."""
     if getattr(tenant, "fees_manually_set", False):
         return int(tenant.setup_fee_etb or 0), int(tenant.quarterly_fee_etb or 0)
-    fees = catalog_default_fees()
-    return int(fees["setup_fee_etb"]), int(fees["quarterly_fee_etb"])
+    fees = resolve_pricing_for_tenant(tenant)
+    return (
+        int(fees.get("setup_fee_etb") or DEFAULT_SETUP_FEE_ETB),
+        int(fees.get("quarterly_fee_etb") or DEFAULT_QUARTERLY_FEE_ETB),
+    )
 
 
 def billing_snapshot(tenant: TenantAccount) -> dict:

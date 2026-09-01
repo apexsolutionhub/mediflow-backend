@@ -11,6 +11,7 @@ from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .billing import effective_tenant_fees
 from .models import TenantAccount, TenantPaymentSubmission
 
 User = get_user_model()
@@ -34,6 +35,8 @@ class SignupRegistrationStatusView(APIView):
         if not tenant:
             return Response({"status": "not_found", "detail": "Tenant not found."})
 
+        setup_fee, _quarterly_fee = effective_tenant_fees(tenant)
+
         if tenant.is_illustration:
             return Response(
                 {
@@ -51,18 +54,18 @@ class SignupRegistrationStatusView(APIView):
                     "status": "approved",
                     "clinic_name": tenant.clinic_name,
                     "clinic_tin": tenant.clinic_tin,
-                    "setup_fee_etb": tenant.setup_fee_etb,
+                    "setup_fee_etb": setup_fee,
                     "provisioned_by_apex": True,
                 }
             )
 
-        if tenant.setup_fee_approved or int(tenant.setup_fee_etb or 0) <= 0:
+        if tenant.setup_fee_approved or setup_fee <= 0:
             return Response(
                 {
                     "status": "approved",
                     "clinic_name": tenant.clinic_name,
                     "clinic_tin": tenant.clinic_tin,
-                    "setup_fee_etb": tenant.setup_fee_etb,
+                    "setup_fee_etb": setup_fee,
                 }
             )
 
@@ -80,7 +83,7 @@ class SignupRegistrationStatusView(APIView):
                     "status": "rejected",
                     "clinic_name": tenant.clinic_name,
                     "clinic_tin": tenant.clinic_tin,
-                    "setup_fee_etb": tenant.setup_fee_etb,
+                    "setup_fee_etb": setup_fee,
                     "rejection_reason": pending.rejection_reason,
                 }
             )
@@ -89,6 +92,6 @@ class SignupRegistrationStatusView(APIView):
                 "status": "pending",
                 "clinic_name": tenant.clinic_name,
                 "clinic_tin": tenant.clinic_tin,
-                "setup_fee_etb": tenant.setup_fee_etb,
+                "setup_fee_etb": setup_fee,
             }
         )
