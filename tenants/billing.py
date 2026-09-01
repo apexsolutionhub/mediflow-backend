@@ -354,16 +354,25 @@ def days_until_due(tenant: TenantAccount, period: str, *, now=None) -> int | Non
     return (due.date() - now.date()).days
 
 
+def effective_tenant_fees(tenant: TenantAccount) -> tuple[int, int]:
+    """Catalog fees unless Apex manually locked this tenant's pricing."""
+    if getattr(tenant, "fees_manually_set", False):
+        return int(tenant.setup_fee_etb or 0), int(tenant.quarterly_fee_etb or 0)
+    fees = catalog_default_fees()
+    return int(fees["setup_fee_etb"]), int(fees["quarterly_fee_etb"])
+
+
 def billing_snapshot(tenant: TenantAccount) -> dict:
     period = compute_period_status(tenant)
     due = billing_due_at(tenant, period)
+    setup_fee, quarterly_fee = effective_tenant_fees(tenant)
     return {
         "clinic_tin": tenant.clinic_tin,
         "clinic_name": tenant.clinic_name,
         "logo_url": tenant.logo_url,
         "branch_name": tenant.branch_name,
-        "setup_fee_etb": tenant.setup_fee_etb,
-        "quarterly_fee_etb": tenant.quarterly_fee_etb,
+        "setup_fee_etb": setup_fee,
+        "quarterly_fee_etb": quarterly_fee,
         "setup_fee_approved": tenant.setup_fee_approved,
         "subscription_payment_approved": tenant.subscription_payment_approved,
         "subscription_paid_until": tenant.subscription_paid_until,
@@ -373,6 +382,7 @@ def billing_snapshot(tenant: TenantAccount) -> dict:
         "free_trial_ends_at": tenant.free_trial_ends_at,
         "is_illustration": tenant.is_illustration,
         "provisioned_by_apex": getattr(tenant, "provisioned_by_apex", False),
+        "fees_manually_set": getattr(tenant, "fees_manually_set", False),
         "billing_notes": tenant.billing_notes,
         "payment_channel": tenant.payment_channel,
         "payment_transaction_ref": tenant.payment_transaction_ref,
