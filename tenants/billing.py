@@ -42,13 +42,57 @@ def compute_subscription_paid_until(*, started_at, periods: int):
     return started_at + timedelta(days=PERIOD_DAYS * periods)
 
 
+def _quarterly_period_status(tenant: TenantAccount, *, now) -> str:
+    quarterly_fee = int(tenant.quarterly_fee_etb or 0)
+    if quarterly_fee <= 0:
+        return "active"
+
+    paid_until = tenant.subscription_paid_until
+    if not paid_until:
+        return "expired"
+
+    if now.date() < paid_until.date():
+        if paid_until - now <= timedelta(days=WARNING_DAYS):
+            return "warning"
+        return "active"
+
+    overdue = now - paid_until
+    if overdue.total_seconds() < 0:
+        overdue = timedelta(0)
+    if overdue <= timedelta(days=GRACE_DAYS):
+        return "grace"
+    return "expired"
+
+
+def _apex_provisioned_period_status(tenant: TenantAccount, *, now) -> str:
+    """Clinics created in mediflow_admin — no setup-fee login gate."""
+    if tenant.free_trial_ends_at and now.date() < tenant.free_trial_ends_at.date():
+        remaining = tenant.free_trial_ends_at - now
+        if remaining <= timedelta(days=TRIAL_ENDING_DAYS):
+            return "trial_ending"
+        return "trial"
+
+    quarterly_fee = int(tenant.quarterly_fee_etb or 0)
+    if quarterly_fee <= 0:
+        return "active"
+
+    paid_until = tenant.subscription_paid_until
+    if not paid_until:
+        return "active"
+
+    return _quarterly_period_status(tenant, now=now)
+
+
 def compute_period_status(tenant: TenantAccount, *, now=None) -> str:
     now = now or timezone.now()
 
-    if tenant.is_illustration:
-        return "exempt"
     if tenant.billing_hold:
         return "on_hold"
+
+    if tenant.is_illustration:
+        return "exempt"
+    if getattr(tenant, "provisioned_by_apex", False):
+        return _apex_provisioned_period_status(tenant, now=now)
 
     setup_fee = int(tenant.setup_fee_etb or 0)
     if setup_fee > 0 and not tenant.setup_fee_approved:
@@ -76,21 +120,7 @@ def compute_period_status(tenant: TenantAccount, *, now=None) -> str:
     if quarterly_fee <= 0:
         return "active" if tenant.setup_fee_approved or setup_fee <= 0 else "setup_pending"
 
-    paid_until = tenant.subscription_paid_until
-    if not paid_until:
-        return "expired"
-
-    if now.date() < paid_until.date():
-        if paid_until - now <= timedelta(days=WARNING_DAYS):
-            return "warning"
-        return "active"
-
-    overdue = now - paid_until
-    if overdue.total_seconds() < 0:
-        overdue = timedelta(0)
-    if overdue <= timedelta(days=GRACE_DAYS):
-        return "grace"
-    return "expired"
+    return _quarterly_period_status(tenant, now=now)
 
 
 def resolve_login_access(tenant: TenantAccount, *, role: str) -> AccessDecision:
@@ -326,6 +356,7 @@ def billing_snapshot(tenant: TenantAccount) -> dict:
         "billing_started_at": tenant.billing_started_at,
         "free_trial_ends_at": tenant.free_trial_ends_at,
         "is_illustration": tenant.is_illustration,
+        "provisioned_by_apex": getattr(tenant, "provisioned_by_apex", False),
         "billing_notes": tenant.billing_notes,
         "payment_channel": tenant.payment_channel,
         "payment_transaction_ref": tenant.payment_transaction_ref,

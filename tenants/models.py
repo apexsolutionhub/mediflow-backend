@@ -40,6 +40,7 @@ class TenantAccount(models.Model):
     billing_started_at = models.DateTimeField(null=True, blank=True)
     free_trial_ends_at = models.DateTimeField(null=True, blank=True)
     is_illustration = models.BooleanField(default=False)
+    provisioned_by_apex = models.BooleanField(default=False)
     billing_notes = models.TextField(blank=True, default="")
     fees_manually_set = models.BooleanField(default=False)
     yearly_fee_etb = models.PositiveIntegerField(default=0)

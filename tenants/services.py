@@ -38,6 +38,7 @@ def ensure_tenant_account(
             "quarterly_fee_etb": fees["quarterly_fee_etb"],
             "setup_fee_approved": False,
             "subscription_payment_approved": False,
+            "provisioned_by_apex": False,
             "sales_agent": sales_agent,
             "ops_mode": normalize_ops_mode(ops_mode),
             "free_trial_ends_at": timezone.now() + timedelta(days=TRIAL_DAYS),
