@@ -65,12 +65,28 @@ def _quarterly_period_status(tenant: TenantAccount, *, now) -> str:
 
 
 def _apex_provisioned_period_status(tenant: TenantAccount, *, now) -> str:
-    """Clinics created in mediflow_admin — no setup-fee login gate."""
-    if tenant.free_trial_ends_at and now.date() < tenant.free_trial_ends_at.date():
-        remaining = tenant.free_trial_ends_at - now
-        if remaining <= timedelta(days=TRIAL_ENDING_DAYS):
-            return "trial_ending"
-        return "trial"
+    """Clinics created in mediflow_admin — skip signup gate, not unpaid setup after trial."""
+    setup_fee = int(tenant.setup_fee_etb or 0)
+    if setup_fee > 0 and not tenant.setup_fee_approved:
+        has_pending = TenantPaymentSubmission.objects.filter(
+            clinic_tin=tenant.clinic_tin,
+            payment_kind=TenantPaymentSubmission.KIND_SETUP,
+            status=TenantPaymentSubmission.STATUS_PENDING,
+        ).exists()
+        has_ref = len((tenant.payment_transaction_ref or "").strip()) >= 4
+        if has_pending or has_ref:
+            if tenant.free_trial_ends_at and now.date() < tenant.free_trial_ends_at.date():
+                remaining = tenant.free_trial_ends_at - now
+                if remaining <= timedelta(days=TRIAL_ENDING_DAYS):
+                    return "trial_ending"
+                return "trial"
+            return "setup_pending"
+        if tenant.free_trial_ends_at and now.date() < tenant.free_trial_ends_at.date():
+            remaining = tenant.free_trial_ends_at - now
+            if remaining <= timedelta(days=TRIAL_ENDING_DAYS):
+                return "trial_ending"
+            return "trial"
+        return "trial_expired"
 
     quarterly_fee = int(tenant.quarterly_fee_etb or 0)
     if quarterly_fee <= 0:
