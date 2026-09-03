@@ -198,14 +198,37 @@ class EncounterViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         encounter.closed_at = timezone.now()
         encounter.save(update_fields=["status", "closed_at"])
         payload = EncounterSerializer(encounter).data
+
+        def medicine_label(order):
+            if order.medicine_id:
+                name = getattr(order.medicine, "name", "") or ""
+                if name:
+                    return name
+            details = (order.details or "").strip()
+            if details:
+                return details.split(" · ")[0].strip()
+            return "Medicine"
+
         payload["external_prescriptions"] = [
             {
                 "id": order.id,
                 "details": order.details,
-                "medicine_name": order.medicine.name if order.medicine_id else "",
+                "medicine_name": medicine_label(order),
             }
             for order in external_rx
         ]
+        upcoming = (
+            Appointment.objects.filter(
+                clinic_tin=encounter.clinic_tin,
+                patient_id=encounter.patient_id,
+                scheduled_at__gte=timezone.now(),
+            )
+            .order_by("scheduled_at")[:20]
+        )
+        payload["follow_up_appointments"] = AppointmentSerializer(upcoming, many=True).data
+        payload["referrals"] = ReferralSerializer(
+            encounter.referrals.all().order_by("created_at"), many=True
+        ).data
         return Response(payload)
 
 
