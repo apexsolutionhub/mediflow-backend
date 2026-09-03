@@ -335,16 +335,29 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         if otype:
             qs = qs.filter(order_type=otype)
         if queue == "lab":
-            qs = qs.filter(order_type="lab", status__in=["PaymentApproved", "InProgress"])
+            # Active work + recently sent results for the lab results portal.
+            qs = qs.filter(
+                order_type="lab",
+                status__in=["PaymentApproved", "InProgress", "Completed", "Reviewed"],
+            )
         if queue == "radiology":
-            qs = qs.filter(order_type="radiology", status__in=["PaymentApproved", "InProgress"])
+            qs = qs.filter(
+                order_type="radiology",
+                status__in=["PaymentApproved", "InProgress", "Completed", "Reviewed"],
+            )
+        if queue == "results":
+            # Doctor inbox: completed / reviewed diagnostic reports.
+            qs = qs.filter(
+                order_type__in=["lab", "radiology"],
+                status__in=["Completed", "Reviewed"],
+            )
         if queue == "pharmacy":
             qs = qs.filter(
                 order_type="prescription",
                 fulfillment=ClinicalOrder.FULFILLMENT_CLINIC,
                 status__in=["PaymentApproved", "InProgress"],
             )
-        return qs.select_related("encounter", "encounter__patient")
+        return qs.select_related("encounter", "encounter__patient").order_by("-updated_at")
 
     def perform_create(self, serializer):
         encounter = serializer.validated_data["encounter"]
@@ -652,6 +665,11 @@ class DashboardView(APIView):
                     encounter__clinic_tin=tin,
                     order_type="radiology",
                     status="PaymentApproved",
+                ).count(),
+                "results_ready": ClinicalOrder.objects.filter(
+                    encounter__clinic_tin=tin,
+                    order_type__in=["lab", "radiology"],
+                    status="Completed",
                 ).count(),
                 "rx_queue": ClinicalOrder.objects.filter(
                     encounter__clinic_tin=tin,
