@@ -10,7 +10,7 @@ from tenants.services import ensure_tenant_account
 from .models import UserProfile
 
 User = get_user_model()
-STAFF_ROLES = {"reception", "doctor", "nurse", "lab", "pharmacist"}
+STAFF_ROLES = {"reception", "doctor", "nurse", "lab", "radiology", "pharmacist"}
 
 
 class UserSerializer(serializers.ModelSerializer):

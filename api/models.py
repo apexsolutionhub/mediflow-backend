@@ -9,6 +9,7 @@ class UserProfile(models.Model):
         ("doctor", "Doctor"),
         ("nurse", "Nurse"),
         ("lab", "Lab"),
+        ("radiology", "Radiology"),
         ("pharmacist", "Pharmacist"),
     )
 

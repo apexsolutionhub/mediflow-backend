@@ -47,7 +47,7 @@ from .serializers import (
     RefundTransactionSerializer,
 )
 
-STAFF_ROLES = {"manager", "reception", "doctor", "nurse", "lab", "pharmacist"}
+STAFF_ROLES = {"manager", "reception", "doctor", "nurse", "lab", "radiology", "pharmacist"}
 
 
 class FlexiblePagination(PageNumberPagination):
@@ -335,7 +335,9 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         if otype:
             qs = qs.filter(order_type=otype)
         if queue == "lab":
-            qs = qs.filter(order_type__in=["lab", "radiology"], status__in=["PaymentApproved", "InProgress"])
+            qs = qs.filter(order_type="lab", status__in=["PaymentApproved", "InProgress"])
+        if queue == "radiology":
+            qs = qs.filter(order_type="radiology", status__in=["PaymentApproved", "InProgress"])
         if queue == "pharmacy":
             qs = qs.filter(
                 order_type="prescription",
@@ -350,12 +352,8 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
             raise PermissionError("Cross-tenant order blocked.")
         service_id = self.request.data.get("service")
         medicine_id = self.request.data.get("medicine")
-        fulfillment = (self.request.data.get("fulfillment") or ClinicalOrder.FULFILLMENT_CLINIC).strip()
-        if fulfillment not in {
-            ClinicalOrder.FULFILLMENT_CLINIC,
-            ClinicalOrder.FULFILLMENT_EXTERNAL,
-        }:
-            fulfillment = ClinicalOrder.FULFILLMENT_CLINIC
+        medicine_name = (self.request.data.get("medicine_name") or "").strip()
+        fulfillment = (self.request.data.get("fulfillment") or "").strip()
         description = serializer.validated_data.get("details") or "Clinical order"
         price = Decimal("0")
         dept = "Laboratory"
@@ -370,6 +368,24 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
                 medicine = None
             if medicine and not description:
                 description = medicine.name
+        # In-stock medicine → clinic pharmacy; free-text name → outside pharmacy print.
+        if serializer.validated_data.get("order_type") == "prescription":
+            if medicine:
+                fulfillment = ClinicalOrder.FULFILLMENT_CLINIC
+            elif medicine_name:
+                fulfillment = ClinicalOrder.FULFILLMENT_EXTERNAL
+                if medicine_name.lower() not in description.lower():
+                    description = f"{medicine_name} · {description}" if description else medicine_name
+            elif fulfillment not in {
+                ClinicalOrder.FULFILLMENT_CLINIC,
+                ClinicalOrder.FULFILLMENT_EXTERNAL,
+            }:
+                fulfillment = ClinicalOrder.FULFILLMENT_CLINIC
+        elif fulfillment not in {
+            ClinicalOrder.FULFILLMENT_CLINIC,
+            ClinicalOrder.FULFILLMENT_EXTERNAL,
+        }:
+            fulfillment = ClinicalOrder.FULFILLMENT_CLINIC
         if service_id not in (None, ""):
             try:
                 service = BillableService.objects.filter(
@@ -384,6 +400,8 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         elif medicine and serializer.validated_data.get("order_type") == "prescription":
             price = medicine.unit_price or Decimal("0")
             dept = "Pharmacy"
+        elif serializer.validated_data.get("order_type") == "radiology":
+            dept = "Radiology"
         quantity = max(1, int(getattr(service, "default_quantity", None) or 1)) if service else 1
         payment_status = "AwaitingPayment"
         order_status = "AwaitingPayment"
@@ -627,7 +645,12 @@ class DashboardView(APIView):
                 ).exclude(payment_status="PaymentApproved").count(),
                 "lab_queue": ClinicalOrder.objects.filter(
                     encounter__clinic_tin=tin,
-                    order_type__in=["lab", "radiology"],
+                    order_type="lab",
+                    status="PaymentApproved",
+                ).count(),
+                "radiology_queue": ClinicalOrder.objects.filter(
+                    encounter__clinic_tin=tin,
+                    order_type="radiology",
                     status="PaymentApproved",
                 ).count(),
                 "rx_queue": ClinicalOrder.objects.filter(
