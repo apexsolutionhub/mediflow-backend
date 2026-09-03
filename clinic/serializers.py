@@ -4,6 +4,7 @@ from .models import (
     Appointment,
     BillableItem,
     BillableService,
+    ClinicBranch,
     ClinicalOrder,
     Department,
     DoctorChart,
@@ -16,6 +17,13 @@ from .models import (
     Referral,
     RefundTransaction,
 )
+
+
+class ClinicBranchSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ClinicBranch
+        fields = "__all__"
+        read_only_fields = ("clinic_tin",)
 
 
 class DepartmentSerializer(serializers.ModelSerializer):

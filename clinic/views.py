@@ -16,6 +16,7 @@ from .models import (
     Appointment,
     BillableItem,
     BillableService,
+    ClinicBranch,
     ClinicalOrder,
     Department,
     DoctorChart,
@@ -32,6 +33,7 @@ from .serializers import (
     AppointmentSerializer,
     BillableItemSerializer,
     BillableServiceSerializer,
+    ClinicBranchSerializer,
     ClinicalOrderSerializer,
     DepartmentSerializer,
     DoctorChartSerializer,
@@ -186,10 +188,25 @@ class EncounterViewSet(TenantScopedMixin, viewsets.ModelViewSet):
                 {"detail": "Checkout blocked until required billable items are approved."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        external_rx = list(
+            encounter.orders.filter(
+                order_type="prescription",
+                fulfillment=ClinicalOrder.FULFILLMENT_EXTERNAL,
+            ).select_related("medicine")
+        )
         encounter.status = Encounter.STATUS_CLOSED
         encounter.closed_at = timezone.now()
         encounter.save(update_fields=["status", "closed_at"])
-        return Response(EncounterSerializer(encounter).data)
+        payload = EncounterSerializer(encounter).data
+        payload["external_prescriptions"] = [
+            {
+                "id": order.id,
+                "details": order.details,
+                "medicine_name": order.medicine.name if order.medicine_id else "",
+            }
+            for order in external_rx
+        ]
+        return Response(payload)
 
 
 class BillableServiceViewSet(TenantScopedMixin, viewsets.ModelViewSet):
@@ -320,7 +337,11 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         if queue == "lab":
             qs = qs.filter(order_type__in=["lab", "radiology"], status__in=["PaymentApproved", "InProgress"])
         if queue == "pharmacy":
-            qs = qs.filter(order_type="prescription", status__in=["PaymentApproved", "InProgress"])
+            qs = qs.filter(
+                order_type="prescription",
+                fulfillment=ClinicalOrder.FULFILLMENT_CLINIC,
+                status__in=["PaymentApproved", "InProgress"],
+            )
         return qs.select_related("encounter", "encounter__patient")
 
     def perform_create(self, serializer):
@@ -328,10 +349,27 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         if encounter.clinic_tin != self.get_clinic_tin():
             raise PermissionError("Cross-tenant order blocked.")
         service_id = self.request.data.get("service")
+        medicine_id = self.request.data.get("medicine")
+        fulfillment = (self.request.data.get("fulfillment") or ClinicalOrder.FULFILLMENT_CLINIC).strip()
+        if fulfillment not in {
+            ClinicalOrder.FULFILLMENT_CLINIC,
+            ClinicalOrder.FULFILLMENT_EXTERNAL,
+        }:
+            fulfillment = ClinicalOrder.FULFILLMENT_CLINIC
         description = serializer.validated_data.get("details") or "Clinical order"
         price = Decimal("0")
         dept = "Laboratory"
         service = None
+        medicine = None
+        if medicine_id not in (None, ""):
+            try:
+                medicine = Medicine.objects.filter(
+                    pk=int(medicine_id), clinic_tin=self.get_clinic_tin()
+                ).first()
+            except (TypeError, ValueError):
+                medicine = None
+            if medicine and not description:
+                description = medicine.name
         if service_id not in (None, ""):
             try:
                 service = BillableService.objects.filter(
@@ -343,22 +381,46 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
                 price = service.unit_price
                 dept = service.department
                 description = (service.description or service.name).strip()[:255]
+        elif medicine and serializer.validated_data.get("order_type") == "prescription":
+            price = medicine.unit_price or Decimal("0")
+            dept = "Pharmacy"
         quantity = max(1, int(getattr(service, "default_quantity", None) or 1)) if service else 1
         payment_status = "AwaitingPayment"
         order_status = "AwaitingPayment"
-        if service and not service.requires_payment_before_work:
+        # External print prescriptions do not enter the pharmacy queue / payment gate.
+        if (
+            serializer.validated_data.get("order_type") == "prescription"
+            and fulfillment == ClinicalOrder.FULFILLMENT_EXTERNAL
+        ):
             payment_status = "PaymentApproved"
             order_status = "PaymentApproved"
-        billable = BillableItem.objects.create(
-            encounter=encounter,
-            service=service,
-            description=description,
-            department=dept,
-            unit_price=price,
-            quantity=quantity,
-            payment_status=payment_status,
+            price = Decimal("0")
+        elif service and not service.requires_payment_before_work:
+            payment_status = "PaymentApproved"
+            order_status = "PaymentApproved"
+        billable = None
+        if not (
+            serializer.validated_data.get("order_type") == "prescription"
+            and fulfillment == ClinicalOrder.FULFILLMENT_EXTERNAL
+        ):
+            billable = BillableItem.objects.create(
+                encounter=encounter,
+                service=service,
+                description=description[:255],
+                department=dept,
+                unit_price=price,
+                quantity=quantity,
+                payment_status=payment_status,
+            )
+        serializer.save(
+            created_by=self.request.user,
+            status=order_status,
+            billable=billable,
+            medicine=medicine,
+            fulfillment=fulfillment
+            if serializer.validated_data.get("order_type") == "prescription"
+            else ClinicalOrder.FULFILLMENT_CLINIC,
         )
-        serializer.save(created_by=self.request.user, status=order_status, billable=billable)
 
     @action(detail=True, methods=["post"])
     def start(self, request, pk=None):
@@ -471,7 +533,11 @@ class DepartmentViewSet(TenantScopedMixin, viewsets.ModelViewSet):
     serializer_class = DepartmentSerializer
 
     def get_queryset(self):
-        return Department.objects.filter(clinic_tin=self.get_clinic_tin())
+        qs = Department.objects.filter(clinic_tin=self.get_clinic_tin())
+        branch = (self.request.query_params.get("branch") or "").strip()
+        if branch:
+            qs = qs.filter(Q(branch_name__iexact=branch) | Q(branch_name=""))
+        return qs
 
     def perform_create(self, serializer):
         serializer.save(clinic_tin=self.get_clinic_tin())
@@ -496,6 +562,33 @@ class DepartmentViewSet(TenantScopedMixin, viewsets.ModelViewSet):
                 {"detail": "Remove or reassign billable services using this department first."}
             )
         instance.delete()
+
+
+class ClinicBranchViewSet(TenantScopedMixin, viewsets.ModelViewSet):
+    serializer_class = ClinicBranchSerializer
+
+    def get_queryset(self):
+        return ClinicBranch.objects.filter(clinic_tin=self.get_clinic_tin())
+
+    def perform_create(self, serializer):
+        tin = self.get_clinic_tin()
+        is_main = bool(serializer.validated_data.get("is_main"))
+        if is_main:
+            ClinicBranch.objects.filter(clinic_tin=tin, is_main=True).update(is_main=False)
+        branch = serializer.save(clinic_tin=tin)
+        if not ClinicBranch.objects.filter(clinic_tin=tin).exclude(pk=branch.pk).exists():
+            if not branch.is_main:
+                branch.is_main = True
+                branch.save(update_fields=["is_main"])
+        return branch
+
+    def perform_update(self, serializer):
+        tin = self.get_clinic_tin()
+        if serializer.validated_data.get("is_main"):
+            ClinicBranch.objects.filter(clinic_tin=tin, is_main=True).exclude(
+                pk=serializer.instance.pk
+            ).update(is_main=False)
+        serializer.save()
 
 
 class TicketViewSet(TenantScopedMixin, viewsets.ModelViewSet):

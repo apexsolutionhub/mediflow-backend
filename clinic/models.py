@@ -5,11 +5,28 @@ from django.db import models
 class Department(models.Model):
     clinic_tin = models.CharField(max_length=50, db_index=True)
     name = models.CharField(max_length=120)
+    branch_name = models.CharField(max_length=120, blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("clinic_tin", "name", "branch_name")
+
+    def __str__(self):
+        return self.name
+
+
+class ClinicBranch(models.Model):
+    clinic_tin = models.CharField(max_length=50, db_index=True)
+    name = models.CharField(max_length=120)
+    address = models.CharField(max_length=255, blank=True, default="")
+    is_main = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         unique_together = ("clinic_tin", "name")
+        ordering = ["-is_main", "name"]
 
     def __str__(self):
         return self.name
@@ -134,11 +151,24 @@ class ClinicalOrder(models.Model):
         ("Reviewed", "Reviewed"),
         ("Dispensed", "Dispensed"),
     )
+    FULFILLMENT_CLINIC = "clinic_pharmacy"
+    FULFILLMENT_EXTERNAL = "external_print"
+    FULFILLMENT_CHOICES = (
+        (FULFILLMENT_CLINIC, "Clinic pharmacy"),
+        (FULFILLMENT_EXTERNAL, "External print"),
+    )
+
     encounter = models.ForeignKey(Encounter, on_delete=models.CASCADE, related_name="orders")
     order_type = models.CharField(max_length=20, choices=ORDER_TYPES)
     status = models.CharField(max_length=32, default="AwaitingPayment")
     details = models.TextField()
     result_text = models.TextField(blank=True)
+    fulfillment = models.CharField(
+        max_length=32, choices=FULFILLMENT_CHOICES, default=FULFILLMENT_CLINIC, blank=True
+    )
+    medicine = models.ForeignKey(
+        "Medicine", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
+    )
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
