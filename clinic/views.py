@@ -112,8 +112,10 @@ class EncounterViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         )
         today = self.request.query_params.get("today")
         if today == "1":
-            start = timezone.localdate()
-            qs = qs.filter(opened_at__date=start).exclude(status=Encounter.STATUS_CLOSED)
+            # Reception desk: every non-closed visit must stay visible so payment
+            # approvals (lab/rad/Rx added mid-visit) are not lost when the calendar
+            # day rolls or timezone offsets shift opened_at.
+            qs = qs.exclude(status=Encounter.STATUS_CLOSED)
         status_q = self.request.query_params.get("status")
         if status_q:
             qs = qs.filter(status=status_q)
@@ -677,8 +679,19 @@ class DashboardView(APIView):
                 "today_encounters": encounters.filter(opened_at__date=today).count(),
                 "open_encounters": encounters.exclude(status=Encounter.STATUS_CLOSED).count(),
                 "pending_payments": BillableItem.objects.filter(
-                    encounter__clinic_tin=tin
-                ).exclude(payment_status="PaymentApproved").count(),
+                    encounter__clinic_tin=tin,
+                )
+                .exclude(payment_status="PaymentApproved")
+                .exclude(encounter__status=Encounter.STATUS_CLOSED)
+                .values("encounter_id")
+                .distinct()
+                .count(),
+                "pending_payment_items": BillableItem.objects.filter(
+                    encounter__clinic_tin=tin,
+                )
+                .exclude(payment_status="PaymentApproved")
+                .exclude(encounter__status=Encounter.STATUS_CLOSED)
+                .count(),
                 "lab_queue": ClinicalOrder.objects.filter(
                     encounter__clinic_tin=tin,
                     order_type="lab",
