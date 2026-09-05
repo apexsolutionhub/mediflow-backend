@@ -19,6 +19,8 @@ class UserSerializer(serializers.ModelSerializer):
     role = serializers.CharField(allow_blank=True, required=False)
     logoUrl = serializers.CharField(allow_blank=True, required=False)
     branch_name = serializers.CharField(allow_blank=True, required=False)
+    branch_address = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    is_main_branch = serializers.BooleanField(write_only=True, required=False, default=True)
     password = serializers.CharField(write_only=True, required=False)
     payment_channel = serializers.CharField(write_only=True, required=False, allow_blank=True)
     payment_transaction_ref = serializers.CharField(write_only=True, required=False, allow_blank=True)
@@ -36,6 +38,8 @@ class UserSerializer(serializers.ModelSerializer):
             "role",
             "logoUrl",
             "branch_name",
+            "branch_address",
+            "is_main_branch",
             "is_active",
             "payment_channel",
             "payment_transaction_ref",
@@ -75,6 +79,9 @@ class UserSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"clinic_tin": ["Clinic TIN is required."]})
             if TenantAccount.objects.filter(clinic_tin=tin).exists():
                 raise serializers.ValidationError({"clinic_tin": ["A clinic with this TIN is already registered."]})
+            branch = (attrs.get("branch_name") or "").strip()
+            if not branch:
+                raise serializers.ValidationError({"branch_name": ["Branch name is required."]})
             channel = (attrs.get("payment_channel") or "").strip()
             ref = (attrs.get("payment_transaction_ref") or "").strip()
             setup_fee = int(catalog_default_fees().get("setup_fee_etb") or 0)
@@ -101,6 +108,10 @@ class UserSerializer(serializers.ModelSerializer):
         payment_transaction_ref = (validated_data.pop("payment_transaction_ref", "") or "").strip()
         sales_agent_id = validated_data.pop("sales_agent_id", None)
         ops_mode = validated_data.pop("ops_mode", None)
+        branch_address = (validated_data.pop("branch_address", "") or "").strip()
+        is_main_branch = validated_data.pop("is_main_branch", True)
+        if is_main_branch is None:
+            is_main_branch = True
         password = validated_data.pop("password", None)
 
         if is_self_signup:
@@ -114,15 +125,17 @@ class UserSerializer(serializers.ModelSerializer):
             if role not in STAFF_ROLES:
                 raise serializers.ValidationError({"role": ["Choose a clinic staff role."]})
             clinic_tin = actor.clinic_tin
+            actor_branch = (actor.branch_name or "").strip() or "Main"
             if UserProfile.objects.filter(
                 clinic_tin=clinic_tin,
+                branch_name__iexact=actor_branch,
                 role__iexact=role,
                 is_active=True,
             ).exists():
                 raise serializers.ValidationError(
                     {
                         "role": [
-                            f"A {role} credential already exists for this clinic. "
+                            f"A {role} credential already exists for this branch. "
                             "Delete or deactivate it before creating another."
                         ]
                     }
@@ -159,6 +172,8 @@ class UserSerializer(serializers.ModelSerializer):
                 clinic_name=profile_data["clinic_name"],
                 logo_url=profile_data["logoUrl"],
                 branch_name=profile_data["branch_name"],
+                branch_address=branch_address,
+                is_main_branch=bool(is_main_branch),
                 sales_agent=resolve_sales_agent(sales_agent_id),
                 ops_mode=ops_mode or TenantAccount.OPS_MODE_ONLINE,
             )

@@ -6,6 +6,7 @@ from api.models import UserProfile
 from clinic.models import (
     Appointment,
     BillableService,
+    ClinicBranch,
     Department,
     Encounter,
     EquipmentTicket,
@@ -101,6 +102,7 @@ class Command(BaseCommand):
             "billable services": BillableService.objects.all().delete()[0],
             "patients": Patient.objects.all().delete()[0],
             "departments": Department.objects.all().delete()[0],
+            "clinic branches": ClinicBranch.objects.all().delete()[0],
         }
 
     def _wipe_tenant_transactions(self, apex_tin: str) -> dict[str, int]:
@@ -125,6 +127,8 @@ class Command(BaseCommand):
         return deleted_tenants, deleted_users
 
     def _reset_apex_tenant(self, tenant: TenantAccount) -> None:
+        branch_name = "Bole"
+        branch_address = "Addis Ababa Bolle infront of skylight hotel"
         tenant.account_status = TenantAccount.STATUS_ACTIVE
         tenant.is_illustration = True
         tenant.setup_fee_approved = True
@@ -141,4 +145,15 @@ class Command(BaseCommand):
         tenant.paid_quarters_count = 0
         tenant.billing_started_at = None
         tenant.sales_agent = None
+        tenant.branch_name = branch_name
         tenant.save()
+
+        ClinicBranch.objects.filter(clinic_tin=tenant.clinic_tin).delete()
+        ClinicBranch.objects.create(
+            clinic_tin=tenant.clinic_tin,
+            name=branch_name,
+            address=branch_address,
+            is_main=True,
+            is_active=True,
+        )
+        UserProfile.objects.filter(clinic_tin=tenant.clinic_tin).update(branch_name=branch_name)

@@ -14,12 +14,62 @@ def normalize_ops_mode(raw) -> str:
     return TenantAccount.OPS_MODE_ONLINE
 
 
+def ensure_clinic_branch(
+    *,
+    clinic_tin: str,
+    name: str,
+    address: str = "",
+    is_main: bool = True,
+):
+    """Create or update the org location row used for referrals and staff scoping."""
+    from clinic.models import ClinicBranch
+
+    tin = (clinic_tin or "").strip()
+    branch_name = (name or "").strip() or "Main"
+    if not tin:
+        return None
+
+    existing = ClinicBranch.objects.filter(clinic_tin=tin, name__iexact=branch_name).first()
+    want_main = bool(is_main)
+    if want_main or not ClinicBranch.objects.filter(clinic_tin=tin).exists():
+        ClinicBranch.objects.filter(clinic_tin=tin, is_main=True).exclude(
+            pk=getattr(existing, "pk", None)
+        ).update(is_main=False)
+        want_main = True
+
+    if existing:
+        dirty = False
+        if existing.name != branch_name:
+            existing.name = branch_name
+            dirty = True
+        addr = (address or "").strip()
+        if addr and existing.address != addr:
+            existing.address = addr
+            dirty = True
+        if want_main and not existing.is_main:
+            existing.is_main = True
+            dirty = True
+        if dirty:
+            existing.save()
+        return existing
+
+    return ClinicBranch.objects.create(
+        clinic_tin=tin,
+        name=branch_name,
+        address=(address or "").strip(),
+        is_main=want_main,
+        is_active=True,
+    )
+
+
 def ensure_tenant_account(
     *,
     clinic_tin: str,
     clinic_name: str = "",
     logo_url: str = "",
     branch_name: str = "Main",
+    branch_address: str = "",
+    is_main_branch: bool = True,
     sales_agent=None,
     ops_mode: str = TenantAccount.OPS_MODE_ONLINE,
 ) -> TenantAccount | None:
@@ -28,12 +78,13 @@ def ensure_tenant_account(
         return None
 
     fees = catalog_default_fees()
+    resolved_branch = (branch_name or "Main").strip() or "Main"
     tenant, created = TenantAccount.objects.get_or_create(
         clinic_tin=tin,
         defaults={
             "clinic_name": (clinic_name or "").strip(),
             "logo_url": (logo_url or "").strip(),
-            "branch_name": (branch_name or "Main").strip() or "Main",
+            "branch_name": resolved_branch,
             "account_status": TenantAccount.STATUS_ACTIVE,
             "setup_fee_etb": fees["setup_fee_etb"],
             "quarterly_fee_etb": fees["quarterly_fee_etb"],
@@ -49,7 +100,7 @@ def ensure_tenant_account(
         dirty = False
         name = (clinic_name or "").strip()
         logo = (logo_url or "").strip()
-        branch = (branch_name or "").strip()
+        branch = resolved_branch
         mode = normalize_ops_mode(ops_mode)
         if name and tenant.clinic_name != name:
             tenant.clinic_name = name
@@ -97,4 +148,11 @@ def ensure_tenant_account(
                     "auto_add_on_registration": auto_add,
                 },
             )
+
+    ensure_clinic_branch(
+        clinic_tin=tin,
+        name=resolved_branch,
+        address=branch_address,
+        is_main=is_main_branch,
+    )
     return tenant

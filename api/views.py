@@ -32,8 +32,13 @@ class UserViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if not user.is_authenticated:
             return User.objects.none()
-        tin = getattr(getattr(user, "profile", None), "clinic_tin", "")
-        return User.objects.filter(profile__clinic_tin=tin).select_related("profile")
+        profile = getattr(user, "profile", None)
+        tin = getattr(profile, "clinic_tin", "")
+        qs = User.objects.filter(profile__clinic_tin=tin).select_related("profile")
+        branch = (getattr(profile, "branch_name", "") or "").strip()
+        if branch:
+            qs = qs.filter(profile__branch_name__iexact=branch)
+        return qs
 
     def destroy(self, request, *args, **kwargs):
         actor_profile = getattr(request.user, "profile", None)
