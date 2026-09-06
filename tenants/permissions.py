@@ -2,6 +2,7 @@ from rest_framework.permissions import BasePermission
 
 from .billing import resolve_login_access
 from .models import TenantAccount
+from .services import resolve_tenant_account
 
 
 class TenantBillingAccessPermission(BasePermission):
@@ -11,7 +12,7 @@ class TenantBillingAccessPermission(BasePermission):
         profile = getattr(request.user, "profile", None)
         if not profile:
             return False
-        tenant = TenantAccount.objects.filter(clinic_tin=(profile.clinic_tin or "").strip()).first()
+        tenant = resolve_tenant_account((profile.clinic_tin or "").strip())
         if not tenant:
             return False
         decision = resolve_login_access(tenant, role=profile.role)

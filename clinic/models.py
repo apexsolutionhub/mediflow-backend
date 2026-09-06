@@ -17,7 +17,10 @@ class Department(models.Model):
 
 
 class ClinicBranch(models.Model):
+    # clinic_tin = organization TIN (groups siblings for referrals / Apex).
     clinic_tin = models.CharField(max_length=50, db_index=True)
+    # branch_tin = this location's operational TIN (may differ from org TIN).
+    branch_tin = models.CharField(max_length=50, blank=True, default="", db_index=True)
     name = models.CharField(max_length=120)
     address = models.CharField(max_length=255, blank=True, default="")
     is_main = models.BooleanField(default=False)
@@ -31,11 +34,15 @@ class ClinicBranch(models.Model):
     def __str__(self):
         return self.name
 
+    def operational_tin(self) -> str:
+        return (self.branch_tin or self.clinic_tin or "").strip()
+
 
 class Patient(models.Model):
     GENDER_CHOICES = (("Male", "Male"), ("Female", "Female"), ("Other", "Other"))
 
     clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
     mrn = models.CharField(max_length=40)
     full_name = models.CharField(max_length=255)
     age = models.PositiveIntegerField(default=0)
@@ -46,7 +53,7 @@ class Patient(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ("clinic_tin", "mrn")
+        unique_together = ("clinic_tin", "mrn", "branch_name")
         ordering = ["-created_at"]
 
 
@@ -57,6 +64,7 @@ class Encounter(models.Model):
     ARRIVAL_CHOICES = (("new", "New"), ("returning", "Returning"), ("referred", "Referred"))
 
     clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
     number = models.CharField(max_length=40, db_index=True)
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="encounters")
     arrival_type = models.CharField(max_length=20, choices=ARRIVAL_CHOICES)
@@ -69,7 +77,7 @@ class Encounter(models.Model):
     )
 
     class Meta:
-        unique_together = ("clinic_tin", "number")
+        unique_together = ("clinic_tin", "number", "branch_name")
         ordering = ["-opened_at"]
 
 
@@ -85,6 +93,7 @@ class BillableService(models.Model):
     )
 
     clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
     code = models.CharField(max_length=40)
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
@@ -98,7 +107,7 @@ class BillableService(models.Model):
     internal_notes = models.TextField(blank=True)
 
     class Meta:
-        unique_together = ("clinic_tin", "code")
+        unique_together = ("clinic_tin", "code", "branch_name")
 
 
 class BillableItem(models.Model):
@@ -196,6 +205,7 @@ class NurseNote(models.Model):
 
 class Appointment(models.Model):
     clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="appointments")
     scheduled_at = models.DateTimeField()
     reason = models.CharField(max_length=255, blank=True)
@@ -226,6 +236,7 @@ class Medicine(models.Model):
     )
 
     clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     sku = models.CharField(max_length=40, blank=True)
@@ -245,6 +256,7 @@ class Medicine(models.Model):
 
 class EquipmentTicket(models.Model):
     clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
     title = models.CharField(max_length=255)
     details = models.TextField(blank=True)
     status = models.CharField(max_length=20, default="Open")
@@ -254,10 +266,69 @@ class EquipmentTicket(models.Model):
 
 
 class Referral(models.Model):
+    KIND_INTERNAL = "internal"
+    KIND_EXTERNAL = "external"
+    KIND_CHOICES = (
+        (KIND_INTERNAL, "Same organization"),
+        (KIND_EXTERNAL, "Outside organization"),
+    )
+    APPROVAL_PENDING = "pending"
+    APPROVAL_APPROVED = "approved"
+    APPROVAL_REJECTED = "rejected"
+    APPROVAL_CHOICES = (
+        (APPROVAL_PENDING, "Pending manager approval"),
+        (APPROVAL_APPROVED, "Approved"),
+        (APPROVAL_REJECTED, "Rejected"),
+    )
+
     encounter = models.ForeignKey(Encounter, on_delete=models.CASCADE, related_name="referrals")
+    destination_kind = models.CharField(
+        max_length=20, choices=KIND_CHOICES, default=KIND_INTERNAL, db_index=True
+    )
     to_department = models.CharField(max_length=120, blank=True)
     to_branch = models.CharField(max_length=120, blank=True)
+    external_institution = models.CharField(max_length=255, blank=True, default="")
     diagnosis = models.TextField(blank=True)
     lab_summary = models.TextField(blank=True)
+    approval_status = models.CharField(
+        max_length=20, choices=APPROVAL_CHOICES, default=APPROVAL_PENDING, db_index=True
+    )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_referrals",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class OrgManagerThread(models.Model):
+    """Direct chat between two branch managers in the same organization."""
+
+    org_tin = models.CharField(max_length=50, db_index=True)
+    tin_a = models.CharField(max_length=50, db_index=True)
+    tin_b = models.CharField(max_length=50, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("org_tin", "tin_a", "tin_b")
+        ordering = ["-updated_at"]
+
+
+class OrgManagerMessage(models.Model):
+    thread = models.ForeignKey(OrgManagerThread, on_delete=models.CASCADE, related_name="messages")
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="org_manager_messages"
+    )
+    sender_tin = models.CharField(max_length=50, db_index=True)
+    body = models.TextField(blank=True, default="")
+    image_url = models.URLField(blank=True, default="")
+    read_by_recipient = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]

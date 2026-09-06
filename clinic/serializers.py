@@ -30,14 +30,14 @@ class DepartmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Department
         fields = "__all__"
-        read_only_fields = ("clinic_tin",)
+        read_only_fields = ("clinic_tin", "branch_name")
 
 
 class PatientSerializer(serializers.ModelSerializer):
     class Meta:
         model = Patient
         fields = "__all__"
-        read_only_fields = ("clinic_tin", "mrn")
+        read_only_fields = ("clinic_tin", "branch_name", "mrn")
 
 
 class BillableItemSerializer(serializers.ModelSerializer):
@@ -94,28 +94,68 @@ class AppointmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Appointment
         fields = "__all__"
-        read_only_fields = ("clinic_tin", "created_by")
+        read_only_fields = ("clinic_tin", "branch_name", "created_by")
 
 
 class MedicineSerializer(serializers.ModelSerializer):
     class Meta:
         model = Medicine
         fields = "__all__"
-        read_only_fields = ("clinic_tin",)
+        read_only_fields = ("clinic_tin", "branch_name")
 
 
 class EquipmentTicketSerializer(serializers.ModelSerializer):
     class Meta:
         model = EquipmentTicket
         fields = "__all__"
-        read_only_fields = ("clinic_tin", "created_by")
+        read_only_fields = ("clinic_tin", "branch_name", "created_by")
 
 
 class ReferralSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source="encounter.patient.full_name", read_only=True)
+    encounter_number = serializers.CharField(source="encounter.number", read_only=True)
+    created_by_name = serializers.SerializerMethodField()
+    approved_by_name = serializers.SerializerMethodField()
+
     class Meta:
         model = Referral
         fields = "__all__"
-        read_only_fields = ("created_by",)
+        read_only_fields = (
+            "created_by",
+            "approval_status",
+            "approved_by",
+            "approved_at",
+        )
+
+    def get_created_by_name(self, obj):
+        user = obj.created_by
+        return getattr(user, "username", "") if user else ""
+
+    def get_approved_by_name(self, obj):
+        user = obj.approved_by
+        return getattr(user, "username", "") if user else ""
+
+    def validate(self, attrs):
+        kind = (attrs.get("destination_kind") or getattr(self.instance, "destination_kind", None) or "internal").strip()
+        if kind == Referral.KIND_INTERNAL:
+            branch = (attrs.get("to_branch") or getattr(self.instance, "to_branch", "") or "").strip()
+            dept = (attrs.get("to_department") or getattr(self.instance, "to_department", "") or "").strip()
+            if not branch:
+                raise serializers.ValidationError({"to_branch": ["Select a destination branch."]})
+            if not dept:
+                raise serializers.ValidationError({"to_department": ["Select a department."]})
+        elif kind == Referral.KIND_EXTERNAL:
+            attrs["to_branch"] = ""
+            attrs["to_department"] = (attrs.get("to_department") or "").strip()
+        else:
+            raise serializers.ValidationError({"destination_kind": ["Choose same-org or outside."]})
+        return attrs
+
+    def create(self, validated_data):
+        validated_data["approval_status"] = Referral.APPROVAL_PENDING
+        validated_data["approved_by"] = None
+        validated_data["approved_at"] = None
+        return super().create(validated_data)
 
 
 class EncounterSerializer(serializers.ModelSerializer):
@@ -144,11 +184,11 @@ class EncounterSerializer(serializers.ModelSerializer):
     class Meta:
         model = Encounter
         fields = "__all__"
-        read_only_fields = ("clinic_tin", "number", "opened_by", "closed_at")
+        read_only_fields = ("clinic_tin", "branch_name", "number", "opened_by", "closed_at")
 
 
 class BillableServiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = BillableService
         fields = "__all__"
-        read_only_fields = ("clinic_tin",)
+        read_only_fields = ("clinic_tin", "branch_name")

@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 
 from .billing import create_payment_submission, effective_tenant_fees
 from .models import TenantAccount, TenantPaymentSubmission
+from .services import resolve_tenant_account
 
 User = get_user_model()
 
@@ -43,7 +44,7 @@ class RenewalStatusView(APIView):
             return Response({"status": "not_found", "detail": "Registration not found."})
 
         tin = (user.profile.clinic_tin or "").strip()
-        tenant = TenantAccount.objects.filter(clinic_tin=tin).first()
+        tenant = resolve_tenant_account(tin)
         if not tenant:
             return Response({"status": "not_found", "detail": "Tenant not found."})
 
@@ -111,7 +112,7 @@ class ResubmitQuarterlyPaymentView(APIView):
             return Response({"detail": "Registration not found."}, status=status.HTTP_404_NOT_FOUND)
 
         tin = (user.profile.clinic_tin or "").strip()
-        tenant = TenantAccount.objects.filter(clinic_tin=tin).first()
+        tenant = resolve_tenant_account(tin)
         if not tenant:
             return Response({"detail": "Tenant not found."}, status=status.HTTP_404_NOT_FOUND)
 

@@ -5,7 +5,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from tenants.billing import PAYMENT_CHANNELS, billing_snapshot, catalog_default_fees, create_payment_submission, resolve_login_access
 from tenants.models import TenantAccount
-from tenants.services import ensure_tenant_account
+from tenants.services import ensure_tenant_account, resolve_tenant_account
 
 from .models import UserProfile
 
@@ -230,12 +230,13 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             raise AuthenticationFailed("This staff account is deactivated.")
         tin = getattr(profile, "clinic_tin", "") if profile else ""
         role = getattr(profile, "role", "") if profile else ""
-        tenant = TenantAccount.objects.filter(clinic_tin=tin).first() if tin else None
+        tenant = resolve_tenant_account(tin) if tin else None
         if tenant is None and tin:
             tenant = ensure_tenant_account(
                 clinic_tin=tin,
                 clinic_name=getattr(profile, "clinic_name", ""),
                 logo_url=getattr(profile, "logoUrl", ""),
+                branch_name=getattr(profile, "branch_name", "") or "Main",
             )
         if tenant is None:
             raise AuthenticationFailed("Clinic tenant was not found.")

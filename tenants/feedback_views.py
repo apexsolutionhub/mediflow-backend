@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import TenantAccount, TenantFeedbackMessage, TenantFeedbackThread
+from .services import resolve_tenant_account
 
 
 def clinic_tin_for_user(user) -> str:
@@ -53,7 +54,7 @@ class ClinicFeedbackThreadView(APIView):
         if not tin:
             return Response({"detail": "Clinic account not found."}, status=404)
 
-        tenant = TenantAccount.objects.filter(clinic_tin=tin).first()
+        tenant = resolve_tenant_account(tin)
         thread, _ = TenantFeedbackThread.objects.get_or_create(pharmacy_tin=tin)
         TenantFeedbackMessage.objects.filter(
             thread=thread,

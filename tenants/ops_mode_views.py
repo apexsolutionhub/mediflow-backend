@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import TenantAccount, TenantOpsModeChangeRequest
+from .services import resolve_tenant_account
 
 User = get_user_model()
 VALID_OPS_MODES = {TenantAccount.OPS_MODE_ONLINE, TenantAccount.OPS_MODE_OFFLINE}
@@ -66,7 +67,7 @@ class OpsModeStatusView(APIView):
         profile = getattr(request.user, "profile", None)
         if not profile:
             return Response({"detail": "Profile not found."}, status=status.HTTP_404_NOT_FOUND)
-        tenant = TenantAccount.objects.filter(clinic_tin=profile.clinic_tin).first()
+        tenant = resolve_tenant_account(profile.clinic_tin)
         if not tenant:
             return Response({"detail": "Tenant not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -127,7 +128,7 @@ class RequestOpsModeChangeView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        tenant = TenantAccount.objects.filter(clinic_tin=profile.clinic_tin).first()
+        tenant = resolve_tenant_account(profile.clinic_tin)
         if not tenant:
             return Response({"detail": "Tenant not found."}, status=status.HTTP_404_NOT_FOUND)
 

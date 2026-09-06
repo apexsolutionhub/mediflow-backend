@@ -14,18 +14,79 @@ def normalize_ops_mode(raw) -> str:
     return TenantAccount.OPS_MODE_ONLINE
 
 
+def resolve_tenant_account(clinic_tin: str) -> TenantAccount | None:
+    """Billing account for this operational TIN (each branch has its own subscription)."""
+    tin = (clinic_tin or "").strip()
+    if not tin:
+        return None
+    return TenantAccount.objects.filter(clinic_tin=tin).first()
+
+
+def org_tin_for(clinic_tin: str) -> str:
+    """Organization TIN used to list sibling branches for in-org referrals."""
+    tin = (clinic_tin or "").strip()
+    if not tin:
+        return ""
+    from clinic.models import ClinicBranch
+
+    branch = ClinicBranch.objects.filter(branch_tin__iexact=tin).first()
+    if branch and (branch.clinic_tin or "").strip():
+        return branch.clinic_tin.strip()
+    if ClinicBranch.objects.filter(clinic_tin__iexact=tin).exists():
+        return tin
+    return tin
+
+
+def seed_branch_catalog(*, clinic_tin: str, branch_name: str) -> None:
+    """Give a branch its own departments/services so it operates like a separate site."""
+    from clinic.models import BillableService, Department
+
+    tin = (clinic_tin or "").strip()
+    branch = (branch_name or "").strip() or "Main"
+    if not tin:
+        return
+
+    Department.objects.get_or_create(
+        clinic_tin=tin,
+        name="General",
+        branch_name=branch,
+        defaults={"is_active": True},
+    )
+    defaults = [
+        ("CONSULT", "Consultation", "Consultation", "consultation", 300, True),
+        ("LAB-CBC", "Complete Blood Count", "Laboratory", "lab", 250, False),
+        ("RAD-XRAY", "Chest X-ray", "Radiology", "radiology", 400, False),
+        ("RX-DISP", "Pharmacy dispensing", "Pharmacy", "pharmacy", 50, False),
+    ]
+    for code, name, dept, service_type, price, auto_add in defaults:
+        BillableService.objects.get_or_create(
+            clinic_tin=tin,
+            code=code,
+            branch_name=branch,
+            defaults={
+                "name": name,
+                "department": dept,
+                "service_type": service_type,
+                "unit_price": price,
+                "auto_add_on_registration": auto_add,
+            },
+        )
+
+
 def ensure_clinic_branch(
     *,
     clinic_tin: str,
     name: str,
     address: str = "",
     is_main: bool = True,
+    branch_tin: str = "",
 ):
     """Create or update the org location row used for referrals and staff scoping."""
     from clinic.models import ClinicBranch
 
     tin = (clinic_tin or "").strip()
     branch_name = (name or "").strip() or "Main"
+    op_tin = (branch_tin or tin).strip() or tin
     if not tin:
         return None
 
@@ -49,12 +110,16 @@ def ensure_clinic_branch(
         if want_main and not existing.is_main:
             existing.is_main = True
             dirty = True
+        if op_tin and (existing.branch_tin or "").strip() != op_tin:
+            existing.branch_tin = op_tin
+            dirty = True
         if dirty:
             existing.save()
         return existing
 
     return ClinicBranch.objects.create(
         clinic_tin=tin,
+        branch_tin=op_tin,
         name=branch_name,
         address=(address or "").strip(),
         is_main=want_main,
@@ -127,32 +192,13 @@ def ensure_tenant_account(
         if dirty:
             tenant.save()
     if created:
-        from clinic.models import BillableService, Department
-
-        Department.objects.get_or_create(clinic_tin=tin, name="General")
-        defaults = [
-            ("CONSULT", "Consultation", "Consultation", "consultation", 300, True),
-            ("LAB-CBC", "Complete Blood Count", "Laboratory", "lab", 250, False),
-            ("RAD-XRAY", "Chest X-ray", "Radiology", "radiology", 400, False),
-            ("RX-DISP", "Pharmacy dispensing", "Pharmacy", "pharmacy", 50, False),
-        ]
-        for code, name, dept, service_type, price, auto_add in defaults:
-            BillableService.objects.get_or_create(
-                clinic_tin=tin,
-                code=code,
-                defaults={
-                    "name": name,
-                    "department": dept,
-                    "service_type": service_type,
-                    "unit_price": price,
-                    "auto_add_on_registration": auto_add,
-                },
-            )
+        seed_branch_catalog(clinic_tin=tin, branch_name=resolved_branch)
 
     ensure_clinic_branch(
         clinic_tin=tin,
         name=resolved_branch,
         address=branch_address,
         is_main=is_main_branch,
+        branch_tin=tin,
     )
     return tenant

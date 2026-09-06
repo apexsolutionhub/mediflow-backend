@@ -12,9 +12,14 @@ from .views import (
     MedicineViewSet,
     NurseNoteViewSet,
     OrderViewSet,
+    OrgManagerPeersView,
+    OrgManagerSendView,
+    OrgManagerThreadView,
+    OrgManagerUnreadView,
     PatientViewSet,
     PaymentViewSet,
     ReferralViewSet,
+    ReportsView,
     TicketViewSet,
 )
 
@@ -35,5 +40,10 @@ router.register("payments", PaymentViewSet, basename="payment")
 
 urlpatterns = [
     path("dashboard/", DashboardView.as_view(), name="clinic-dashboard"),
+    path("reports/", ReportsView.as_view(), name="clinic-reports"),
+    path("org-chat/peers/", OrgManagerPeersView.as_view(), name="org-chat-peers"),
+    path("org-chat/thread/", OrgManagerThreadView.as_view(), name="org-chat-thread"),
+    path("org-chat/send/", OrgManagerSendView.as_view(), name="org-chat-send"),
+    path("org-chat/unread/", OrgManagerUnreadView.as_view(), name="org-chat-unread"),
     path("", include(router.urls)),
 ]

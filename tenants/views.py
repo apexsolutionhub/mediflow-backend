@@ -11,6 +11,7 @@ from .billing import (
     resolve_login_access,
 )
 from .models import TenantAccount, TenantPaymentSubmission
+from .services import resolve_tenant_account
 
 User = get_user_model()
 
@@ -46,7 +47,7 @@ class SubmitTenantPaymentView(APIView):
             )
 
         tin = (profile.clinic_tin or "").strip()
-        tenant = TenantAccount.objects.filter(clinic_tin=tin).first()
+        tenant = resolve_tenant_account(tin)
         if not tenant:
             return Response({"detail": "Tenant account not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -99,7 +100,7 @@ class BillingMeView(APIView):
         profile = getattr(request.user, "profile", None)
         if not profile:
             return Response({"detail": "Profile not found."}, status=status.HTTP_404_NOT_FOUND)
-        tenant = TenantAccount.objects.filter(clinic_tin=profile.clinic_tin).first()
+        tenant = resolve_tenant_account(profile.clinic_tin)
         if not tenant:
             return Response({"detail": "Tenant account not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -148,7 +149,7 @@ class SignupRegistrationStatusView(APIView):
             return Response({"status": "not_found", "detail": "Registration not found."})
 
         tin = (user.profile.clinic_tin or "").strip()
-        tenant = TenantAccount.objects.filter(clinic_tin=tin).first()
+        tenant = resolve_tenant_account(tin)
         if not tenant:
             return Response({"status": "not_found", "detail": "Tenant not found."})
 
