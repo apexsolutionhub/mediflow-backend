@@ -1,7 +1,8 @@
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import F, Q, Sum
+from django.db.models import Count, F, Q, Sum
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
@@ -733,13 +734,17 @@ class ClinicBranchViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         tin = org_tin_of(self.request.user) or self.get_clinic_tin()
         is_main = bool(serializer.validated_data.get("is_main"))
         if is_main:
-            ClinicBranch.objects.filter(clinic_tin=tin, is_main=True).update(is_main=False)
+            ClinicBranch.objects.filter(clinic_tin__iexact=tin, is_main=True).update(is_main=False)
         branch_tin = (serializer.validated_data.get("branch_tin") or self.get_clinic_tin()).strip()
         branch = serializer.save(clinic_tin=tin, branch_tin=branch_tin)
-        if not ClinicBranch.objects.filter(clinic_tin=tin).exclude(pk=branch.pk).exists():
+        if not ClinicBranch.objects.filter(clinic_tin__iexact=tin).exclude(pk=branch.pk).exists():
             if not branch.is_main:
                 branch.is_main = True
                 branch.save(update_fields=["is_main"])
+        elif branch.is_main:
+            ClinicBranch.objects.filter(clinic_tin__iexact=tin, is_main=True).exclude(
+                pk=branch.pk
+            ).update(is_main=False)
         from tenants.services import ensure_tenant_account, seed_branch_catalog
 
         op_tin = branch.operational_tin() or tin
@@ -756,7 +761,7 @@ class ClinicBranchViewSet(TenantScopedMixin, viewsets.ModelViewSet):
     def perform_update(self, serializer):
         tin = org_tin_of(self.request.user) or self.get_clinic_tin()
         if serializer.validated_data.get("is_main"):
-            ClinicBranch.objects.filter(clinic_tin=tin, is_main=True).exclude(
+            ClinicBranch.objects.filter(clinic_tin__iexact=tin, is_main=True).exclude(
                 pk=serializer.instance.pk
             ).update(is_main=False)
         serializer.save()
@@ -962,6 +967,60 @@ class ReportsView(APIView):
             created_at__date__lte=end,
         )
         revenue = payments.aggregate(total=Sum("amount"))["total"] or 0
+        refunds = RefundTransaction.objects.filter(
+            encounter__clinic_tin=tin,
+            encounter__branch_name__iexact=branch,
+            created_at__date__gte=start,
+            created_at__date__lte=end,
+        )
+        refund_total = refunds.aggregate(total=Sum("amount"))["total"] or 0
+        billable_items = BillableItem.objects.filter(
+            encounter__clinic_tin=tin,
+            encounter__branch_name__iexact=branch,
+            encounter__opened_at__date__gte=start,
+            encounter__opened_at__date__lte=end,
+        )
+        visits = encounters.count()
+        avg_revenue = float(revenue) / visits if visits else 0
+
+        revenue_by_day = list(
+            payments.annotate(day=TruncDate("created_at"))
+            .values("day")
+            .annotate(total=Sum("amount"), count=Count("id"))
+            .order_by("day")
+        )
+        tender_breakdown = list(
+            payments.values("tender_method")
+            .annotate(total=Sum("amount"), count=Count("id"))
+            .order_by("-total")
+        )
+        arrival_breakdown = list(
+            encounters.values("arrival_type")
+            .annotate(count=Count("id"))
+            .order_by("-count")
+        )
+        referral_status = list(
+            Referral.objects.filter(
+                encounter__clinic_tin=tin,
+                encounter__branch_name__iexact=branch,
+                created_at__date__gte=start,
+                created_at__date__lte=end,
+            )
+            .values("approval_status", "destination_kind")
+            .annotate(count=Count("id"))
+            .order_by("destination_kind", "approval_status")
+        )
+        top_services = list(
+            billable_items.values("description", "department")
+            .annotate(count=Count("id"), revenue=Sum("paid_amount"))
+            .order_by("-count")[:8]
+        )
+        order_status = list(
+            orders.values("order_type", "status")
+            .annotate(count=Count("id"))
+            .order_by("order_type", "status")
+        )
+
         return Response(
             {
                 "period": period_key,
@@ -969,7 +1028,46 @@ class ReportsView(APIView):
                 "start_date": start.isoformat(),
                 "end_date": end.isoformat(),
                 "branch_name": branch,
-                "visits": encounters.count(),
+                "summary": {
+                    "visits": visits,
+                    "new_patients": Patient.objects.filter(
+                        clinic_tin=tin,
+                        branch_name__iexact=branch,
+                        created_at__date__gte=start,
+                        created_at__date__lte=end,
+                    ).count(),
+                    "open_encounters": encounters.exclude(
+                        status=Encounter.STATUS_CLOSED
+                    ).count(),
+                    "closed_encounters": encounters.filter(
+                        status=Encounter.STATUS_CLOSED
+                    ).count(),
+                    "revenue": revenue,
+                    "refunds": refund_total,
+                    "net_revenue": (revenue or 0) - (refund_total or 0),
+                    "payment_count": payments.count(),
+                    "avg_revenue_per_visit": round(avg_revenue, 2),
+                    "billable_items": billable_items.count(),
+                    "lab_orders": orders.filter(order_type="lab").count(),
+                    "radiology_orders": orders.filter(order_type="radiology").count(),
+                    "prescriptions": orders.filter(order_type="prescription").count(),
+                    "referrals": Referral.objects.filter(
+                        encounter__clinic_tin=tin,
+                        encounter__branch_name__iexact=branch,
+                        created_at__date__gte=start,
+                        created_at__date__lte=end,
+                    ).count(),
+                    "low_stock": Medicine.objects.filter(
+                        clinic_tin=tin,
+                        branch_name__iexact=branch,
+                        on_hand__lte=F("min_threshold"),
+                    ).count(),
+                    "open_tickets": EquipmentTicket.objects.filter(
+                        clinic_tin=tin, branch_name__iexact=branch, status="Open"
+                    ).count(),
+                },
+                # Flat keys kept for older clients
+                "visits": visits,
                 "new_patients": Patient.objects.filter(
                     clinic_tin=tin,
                     branch_name__iexact=branch,
@@ -994,6 +1092,51 @@ class ReportsView(APIView):
                 "open_tickets": EquipmentTicket.objects.filter(
                     clinic_tin=tin, branch_name__iexact=branch, status="Open"
                 ).count(),
+                "revenue_by_day": [
+                    {
+                        "date": row["day"].isoformat() if row["day"] else "",
+                        "total": row["total"] or 0,
+                        "count": row["count"],
+                    }
+                    for row in revenue_by_day
+                ],
+                "tender_breakdown": [
+                    {
+                        "method": row["tender_method"] or "unspecified",
+                        "total": row["total"] or 0,
+                        "count": row["count"],
+                    }
+                    for row in tender_breakdown
+                ],
+                "arrival_breakdown": [
+                    {"arrival_type": row["arrival_type"] or "unknown", "count": row["count"]}
+                    for row in arrival_breakdown
+                ],
+                "referral_breakdown": [
+                    {
+                        "kind": row["destination_kind"] or "internal",
+                        "status": row["approval_status"] or "pending",
+                        "count": row["count"],
+                    }
+                    for row in referral_status
+                ],
+                "top_services": [
+                    {
+                        "description": row["description"] or "Service",
+                        "department": row["department"] or "",
+                        "count": row["count"],
+                        "revenue": row["revenue"] or 0,
+                    }
+                    for row in top_services
+                ],
+                "order_status_breakdown": [
+                    {
+                        "order_type": row["order_type"],
+                        "status": row["status"],
+                        "count": row["count"],
+                    }
+                    for row in order_status
+                ],
             }
         )
 
