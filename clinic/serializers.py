@@ -109,6 +109,31 @@ class ClinicalOrderSerializer(serializers.ModelSerializer):
     result_values = OrderResultValueSerializer(many=True, read_only=True)
     test_parameters = serializers.SerializerMethodField()
     radiology_report = RadiologyReportSerializer(read_only=True)
+    test_name = serializers.SerializerMethodField()
+    abnormal_count = serializers.SerializerMethodField()
+    has_critical = serializers.SerializerMethodField()
+
+    def get_test_name(self, obj):
+        billable = obj.billable
+        if billable is not None:
+            if billable.service_id and billable.service.name:
+                return billable.service.name
+            if billable.description:
+                return billable.description
+        return (obj.details or "").strip()[:80]
+
+    def _flags(self, obj):
+        flags = [v.flag for v in obj.result_values.all()]
+        report = getattr(obj, "radiology_report", None)
+        if report is not None:
+            flags.append(report.tag)
+        return flags
+
+    def get_abnormal_count(self, obj):
+        return sum(1 for f in self._flags(obj) if f != "normal")
+
+    def get_has_critical(self, obj):
+        return "critical" in self._flags(obj)
 
     def get_test_parameters(self, obj):
         if obj.order_type != "lab" or not obj.billable_id or not obj.billable.service_id:

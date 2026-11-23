@@ -1063,6 +1063,31 @@ def _report_period_bounds(period: str):
     return key, label, start, today
 
 
+MAX_CUSTOM_RANGE_DAYS = 731
+
+
+def _parse_custom_range(params):
+    """Return (start, end) for ?from=YYYY-MM-DD&to=YYYY-MM-DD, or None if absent.
+
+    Raises ValueError with a user-facing message when present but invalid.
+    """
+    raw_from, raw_to = params.get("from"), params.get("to")
+    if not raw_from and not raw_to:
+        return None
+    from datetime import date
+
+    try:
+        start = date.fromisoformat((raw_from or "").strip())
+        end = date.fromisoformat((raw_to or raw_from or "").strip())
+    except ValueError:
+        raise ValueError("Dates must be YYYY-MM-DD.")
+    if end < start:
+        raise ValueError("The end date is before the start date.")
+    if (end - start).days > MAX_CUSTOM_RANGE_DAYS:
+        raise ValueError("Choose a range of two years or less.")
+    return start, end
+
+
 class ReportsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1074,6 +1099,13 @@ class ReportsView(APIView):
         period_key, period_label, start, end = _report_period_bounds(
             request.query_params.get("period") or "day"
         )
+        try:
+            custom = _parse_custom_range(request.query_params)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        if custom:
+            start, end = custom
+            period_key, period_label = "custom", "Custom range"
         encounters = Encounter.objects.filter(
             clinic_tin=tin,
             branch_name__iexact=branch,
@@ -1113,6 +1145,12 @@ class ReportsView(APIView):
             payments.annotate(day=TruncDate("created_at"))
             .values("day")
             .annotate(total=Sum("amount"), count=Count("id"))
+            .order_by("day")
+        )
+        visits_by_day = list(
+            encounters.annotate(day=TruncDate("opened_at"))
+            .values("day")
+            .annotate(count=Count("id"))
             .order_by("day")
         )
         tender_breakdown = list(
@@ -1225,6 +1263,10 @@ class ReportsView(APIView):
                         "count": row["count"],
                     }
                     for row in revenue_by_day
+                ],
+                "visits_by_day": [
+                    {"date": row["day"].isoformat() if row["day"] else "", "count": row["count"]}
+                    for row in visits_by_day
                 ],
                 "tender_breakdown": [
                     {

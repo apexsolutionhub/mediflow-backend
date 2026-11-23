@@ -154,3 +154,46 @@ class RadiologyReportTests(APITestCase):
             format="json",
         )
         self.assertEqual(res.status_code, 400)
+
+
+@mock.patch("tenants.permissions.TenantBillingAccessPermission.has_permission", return_value=True)
+class ReportsRangeTests(APITestCase):
+    def setUp(self):
+        user = get_user_model().objects.create_user("mgr2", password="x")
+        UserProfile.objects.create(user=user, clinic_tin=TIN, role="manager", branch_name="Main")
+        doc = get_user_model().objects.create_user("doc2", password="x")
+        UserProfile.objects.create(user=doc, clinic_tin=TIN, role="doctor", branch_name="Main")
+        self.mgr, self.doc = user, doc
+        patient = Patient.objects.create(clinic_tin=TIN, branch_name="Main", mrn="R1", full_name="P")
+        Encounter.objects.create(
+            clinic_tin=TIN, branch_name="Main", number="R-1", patient=patient, arrival_type="new"
+        )
+
+    def test_custom_range_filters_and_labels(self, _perm):
+        self.client.force_authenticate(self.mgr)
+        res = self.client.get("/api/clinic/reports/", {"from": "2020-01-01", "to": "2020-01-31"})
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data["period"], "custom")
+        self.assertEqual((res.data["start_date"], res.data["end_date"]), ("2020-01-01", "2020-01-31"))
+        self.assertEqual(res.data["summary"]["visits"], 0)
+        self.assertEqual(res.data["visits_by_day"], [])
+
+    def test_range_including_today_counts_visit(self, _perm):
+        from django.utils import timezone
+
+        today = timezone.localdate().isoformat()
+        self.client.force_authenticate(self.mgr)
+        res = self.client.get("/api/clinic/reports/", {"from": today, "to": today})
+        self.assertEqual(res.data["summary"]["visits"], 1)
+        self.assertEqual(res.data["visits_by_day"][0]["count"], 1)
+
+    def test_invalid_ranges_rejected(self, _perm):
+        self.client.force_authenticate(self.mgr)
+        for params in ({"from": "nope", "to": "2020-01-02"},
+                       {"from": "2020-02-01", "to": "2020-01-01"},
+                       {"from": "2015-01-01", "to": "2020-01-01"}):
+            self.assertEqual(self.client.get("/api/clinic/reports/", params).status_code, 400, params)
+
+    def test_non_manager_forbidden(self, _perm):
+        self.client.force_authenticate(self.doc)
+        self.assertEqual(self.client.get("/api/clinic/reports/", {"from": "2020-01-01"}).status_code, 403)
