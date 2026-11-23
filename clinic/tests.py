@@ -281,6 +281,7 @@ class DispenseOrderedMedicineTests(APITestCase):
         )
         return ClinicalOrder.objects.create(
             encounter=self.enc, order_type="prescription", details="x", medicine=medicine,
+            quantity=quantity,
             status="PaymentApproved" if approved else "AwaitingPayment", billable=bill,
             fulfillment=ClinicalOrder.FULFILLMENT_CLINIC,
         )
@@ -309,7 +310,7 @@ class DispenseOrderedMedicineTests(APITestCase):
         order = self._order(self.amox, quantity=11)
         res = self._dispense(order)
         self.assertEqual(res.status_code, 400)
-        self.assertIn("Insufficient stock", res.data["detail"])
+        self.assertIn("not enough stock", res.data["detail"])
         self.amox.refresh_from_db()
         order.refresh_from_db()
         self.assertEqual((self.amox.on_hand, order.status), (10, "PaymentApproved"))

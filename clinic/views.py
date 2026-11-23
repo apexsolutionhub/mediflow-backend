@@ -6,6 +6,7 @@ from django.db.models.functions import TruncDate
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -13,6 +14,7 @@ from rest_framework.views import APIView
 
 from tenants.permissions import TenantBillingAccessPermission
 
+from . import stock
 from .models import (
     Appointment,
     BillableItem,
@@ -34,6 +36,7 @@ from .models import (
     PaymentTransaction,
     Referral,
     RefundTransaction,
+    Supplier,
 )
 from .serializers import (
     LabTestParameterSerializer,
@@ -52,6 +55,7 @@ from .serializers import (
     PaymentTransactionSerializer,
     ReferralSerializer,
     RefundTransactionSerializer,
+    SupplierSerializer,
 )
 
 STAFF_ROLES = {"manager", "reception", "doctor", "nurse", "lab", "radiology", "pharmacist"}
@@ -491,6 +495,26 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
             .order_by("-updated_at")
         )
 
+    def _parse_rx_amount(self, medicine):
+        """Read and check `quantity` / `sale_unit` of a prescription for an inventory medicine."""
+        raw_qty = self.request.data.get("quantity", 1)
+        try:
+            qty = int(raw_qty)
+        except (TypeError, ValueError):
+            raise ValidationError({"quantity": ["Enter a whole number."]})
+        if qty < 1 or qty > 100000:
+            raise ValidationError({"quantity": ["Quantity must be at least 1."]})
+        unit = (self.request.data.get("sale_unit") or stock.PACK).strip().lower()
+        if unit not in stock.SALE_UNITS:
+            raise ValidationError({"sale_unit": ["Choose pack or loose."]})
+        if unit == stock.LOOSE and not stock.is_splittable(medicine):
+            raise ValidationError({"sale_unit": [f"{medicine.name} is not sold loose."]})
+        if stock.capacity(medicine, unit) < qty:
+            raise ValidationError(
+                {"quantity": [f"{medicine.name}: only {stock.stock_text(medicine)} in stock."]}
+            )
+        return qty, unit
+
     def perform_create(self, serializer):
         encounter = serializer.validated_data["encounter"]
         branch = self.get_branch_name()
@@ -507,6 +531,7 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         dept = "Laboratory"
         service = None
         medicine = None
+        rx_quantity, rx_sale_unit = 1, stock.PACK
         if medicine_id not in (None, ""):
             try:
                 medicine = Medicine.objects.filter(
@@ -550,11 +575,14 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
                 dept = service.department
                 description = (service.description or service.name).strip()[:255]
         elif medicine and serializer.validated_data.get("order_type") == "prescription":
-            price = medicine.unit_price or Decimal("0")
+            rx_quantity, rx_sale_unit = self._parse_rx_amount(medicine)
+            price = stock.unit_price_for(medicine, rx_sale_unit)
             dept = "Pharmacy"
         elif serializer.validated_data.get("order_type") == "radiology":
             dept = "Radiology"
         quantity = max(1, int(getattr(service, "default_quantity", None) or 1)) if service else 1
+        if medicine and serializer.validated_data.get("order_type") == "prescription":
+            quantity = rx_quantity  # billed per pack, or per loose unit when sold loose
         payment_status = "AwaitingPayment"
         order_status = "AwaitingPayment"
         # External print prescriptions do not enter the pharmacy queue / payment gate.
@@ -587,6 +615,8 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
             status=order_status,
             billable=billable,
             medicine=medicine,
+            quantity=rx_quantity,
+            sale_unit=rx_sale_unit,
             fulfillment=fulfillment
             if serializer.validated_data.get("order_type") == "prescription"
             else ClinicalOrder.FULFILLMENT_CLINIC,
@@ -700,10 +730,10 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def dispense(self, request, pk=None):
-        """Sell and stock out the medicine the doctor ordered, exactly as billed.
+        """Sell and stock out the medicine the doctor ordered, exactly as ordered and billed.
 
-        The pharmacist does not choose a medicine or quantity: the order already says
-        which medicine (order.medicine) and the billed line says how many units.
+        The pharmacist does not choose a medicine, quantity or unit: the order already says
+        which medicine, how many, and whether they are whole packs or loose units.
         Anything sent in the request body is ignored.
         """
         if role_of(request.user) not in {"pharmacist", "manager"}:
@@ -721,7 +751,7 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
                 },
                 status=400,
             )
-        qty = max(1, int(order.billable.quantity)) if order.billable_id else 1
+        qty = max(1, int(order.quantity))
         with transaction.atomic():
             # Lock the stock row so two dispenses cannot both pass the stock check.
             medicine = Medicine.objects.select_for_update().filter(
@@ -731,16 +761,11 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
             ).first()
             if not medicine:
                 return Response({"detail": "Medicine not found in this branch."}, status=404)
-            if medicine.on_hand < qty:
-                return Response(
-                    {
-                        "detail": f"Insufficient stock for {medicine.name}: "
-                        f"{medicine.on_hand} on hand, {qty} needed."
-                    },
-                    status=400,
-                )
-            medicine.on_hand -= qty
-            medicine.save(update_fields=["on_hand"])
+            try:
+                stock.deduct(medicine, qty, order.sale_unit)
+            except stock.StockError as exc:
+                return Response({"detail": exc.message}, status=400)
+            medicine.save(update_fields=stock.STOCK_FIELDS)
             order.status = "Dispensed"
             order.save(update_fields=["status"])
         return Response(ClinicalOrderSerializer(order).data)
@@ -809,17 +834,93 @@ class AppointmentViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         )
 
 
-class MedicineViewSet(TenantScopedMixin, viewsets.ModelViewSet):
+class ManagerWritesMixin:
+    """Everyone in the clinic may read; only the manager may create, change or delete."""
+
+    manager_write_actions = {"create", "update", "partial_update", "destroy", "batch"}
+
+    def check_permissions(self, request):
+        super().check_permissions(request)
+        if self.action in self.manager_write_actions and role_of(request.user) != "manager":
+            raise PermissionDenied("Only the clinic manager can change this catalog.")
+
+
+class SupplierViewSet(ManagerWritesMixin, TenantScopedMixin, viewsets.ModelViewSet):
+    serializer_class = SupplierSerializer
+
+    def get_queryset(self):
+        return scope_branch(
+            Supplier.objects.filter(clinic_tin=self.get_clinic_tin()), self.request.user
+        )
+
+    def perform_create(self, serializer):
+        name = serializer.validated_data["supplier_name"]
+        tin, branch = self.get_clinic_tin(), self.get_branch_name()
+        if Supplier.objects.filter(
+            clinic_tin=tin, branch_name__iexact=branch, supplier_name__iexact=name
+        ).exists():
+            raise ValidationError({"supplier_name": ["A supplier with this name already exists."]})
+        serializer.save(clinic_tin=tin, branch_name=branch)
+
+    def perform_destroy(self, instance):
+        count = instance.medicines.count()
+        if count:
+            raise ValidationError(
+                {"detail": f"{instance.supplier_name} supplies {count} medicine line(s). Remove or reassign those first."}
+            )
+        instance.delete()
+
+
+class MedicineViewSet(ManagerWritesMixin, TenantScopedMixin, viewsets.ModelViewSet):
     serializer_class = MedicineSerializer
 
     def get_queryset(self):
         return scope_branch(
-            Medicine.objects.filter(clinic_tin=self.get_clinic_tin()),
+            Medicine.objects.filter(clinic_tin=self.get_clinic_tin()).select_related("supplier"),
             self.request.user,
         )
 
     def perform_create(self, serializer):
         serializer.save(clinic_tin=self.get_clinic_tin(), branch_name=self.get_branch_name())
+
+    def perform_destroy(self, instance):
+        # Deleting a stock line would erase what is still owed to the supplier.
+        owed = (Decimal(instance.received_quantity) * Decimal(instance.cost)) - Decimal(instance.paid_amount)
+        if owed > Decimal("0.01"):
+            raise ValidationError(
+                {
+                    "detail": f"{instance.name} still has {owed:.2f} ETB owed to the supplier. "
+                    "Record the payment (edit Paid amount) before deleting it."
+                }
+            )
+        instance.delete()
+
+    @action(detail=False, methods=["post"])
+    def batch(self, request):
+        """Register several medicine lines at once: all are saved, or none are."""
+        items = request.data.get("items")
+        if not isinstance(items, list) or not items:
+            raise ValidationError({"detail": "Add at least one medicine line."})
+        if len(items) > 100:
+            raise ValidationError({"detail": "At most 100 lines at a time."})
+        serializers_ = [MedicineSerializer(data=item, context=self.get_serializer_context()) for item in items]
+        errors = []
+        for index, ser in enumerate(serializers_, start=1):
+            if not ser.is_valid():
+                name = (items[index - 1] or {}).get("name") or f"Line {index}"
+                errors.append({"line": index, "name": name, "errors": ser.errors})
+        if errors:
+            return Response(
+                {"detail": f"{len(errors)} line(s) need fixing. Nothing was saved.", "errors": errors},
+                status=400,
+            )
+        tin, branch = self.get_clinic_tin(), self.get_branch_name()
+        with transaction.atomic():
+            saved = [ser.save(clinic_tin=tin, branch_name=branch) for ser in serializers_]
+        return Response(
+            MedicineSerializer(saved, many=True, context=self.get_serializer_context()).data,
+            status=201,
+        )
 
 
 class DepartmentViewSet(TenantScopedMixin, viewsets.ModelViewSet):

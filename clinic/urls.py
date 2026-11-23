@@ -20,6 +20,7 @@ from .views import (
     PaymentViewSet,
     ReferralViewSet,
     ReportsView,
+    SupplierViewSet,
     TicketViewSet,
 )
 
@@ -32,6 +33,7 @@ router.register("charts", ChartViewSet, basename="chart")
 router.register("nurse-notes", NurseNoteViewSet, basename="nurse-note")
 router.register("appointments", AppointmentViewSet, basename="appointment")
 router.register("medicines", MedicineViewSet, basename="medicine")
+router.register("suppliers", SupplierViewSet, basename="supplier")
 router.register("departments", DepartmentViewSet, basename="department")
 router.register("branches", ClinicBranchViewSet, basename="branch")
 router.register("tickets", TicketViewSet, basename="ticket")

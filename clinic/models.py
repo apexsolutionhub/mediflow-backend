@@ -180,6 +180,9 @@ class ClinicalOrder(models.Model):
     medicine = models.ForeignKey(
         "Medicine", on_delete=models.SET_NULL, null=True, blank=True, related_name="orders"
     )
+    # Prescriptions: how much to sell, counted in whole packs or loose units (tablets...).
+    quantity = models.PositiveIntegerField(default=1, db_default=1)
+    sale_unit = models.CharField(max_length=8, default="pack", db_default="pack")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -215,42 +218,94 @@ class Appointment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
+class Supplier(models.Model):
+    """Who a medicine stock line was bought from (per clinic branch)."""
+
+    clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    supplier_name = models.CharField(max_length=255)
+    supplier_phone = models.CharField(max_length=32)
+    supplier_email = models.EmailField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["supplier_name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["clinic_tin", "branch_name", "supplier_name"],
+                name="uniq_supplier_name_per_branch",
+            )
+        ]
+
+    def __str__(self):
+        return self.supplier_name
+
+
 class Medicine(models.Model):
+    """One medicine stock line: a batch of one product bought from one supplier."""
+
     UNITS = (
-        ("tablet", "Tablet"),
-        ("capsule", "Capsule"),
-        ("bottle", "Bottle"),
-        ("vial", "Vial"),
-        ("tube", "Tube"),
-        ("pack", "Pack"),
+        ("litre", "Litre"),
+        ("kilogram", "Kilogram"),
+        ("piece", "Piece"),
+        ("packet", "Packet"),
+        ("box", "Box"),
+        ("dozen", "Dozen"),
         ("other", "Other"),
     )
     CATEGORIES = (
-        ("antibiotic", "Antibiotic"),
-        ("analgesic", "Analgesic"),
-        ("antipyretic", "Antipyretic"),
-        ("antihypertensive", "Antihypertensive"),
-        ("vitamin", "Vitamin / supplement"),
-        ("antacid", "Antacid"),
-        ("topical", "Topical"),
-        ("infusion", "Infusion / injectable"),
+        ("pain_fever", "Pain & fever"),
+        ("antibiotics", "Antibiotics"),
+        ("malaria", "Malaria medicines"),
+        ("deworming", "Deworming (worms)"),
+        ("diarrhea_ors", "Diarrhea & ORS"),
+        ("stomach_acid_ulcer", "Stomach acid / ulcer"),
+        ("allergy", "Allergy & itching"),
+        ("cough_cold", "Cough & cold"),
+        ("asthma", "Asthma / breathing"),
+        ("hypertension", "Blood pressure"),
+        ("diabetes", "Diabetes"),
+        ("family_planning", "Family planning"),
+        ("pregnancy", "Pregnancy / mothers"),
+        ("skin", "Skin"),
+        ("fungal", "Fungal"),
+        ("eye_ear", "Eye / ear"),
+        ("vitamins", "Vitamins"),
         ("other", "Other"),
     )
 
     clinic_tin = models.CharField(max_length=50, db_index=True)
     branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    supplier = models.ForeignKey(
+        Supplier, on_delete=models.SET_NULL, null=True, blank=True, related_name="medicines"
+    )
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
-    sku = models.CharField(max_length=40, blank=True)
+    sku = models.CharField(max_length=40, blank=True)  # legacy: no longer shown
     category = models.CharField(max_length=32, choices=CATEGORIES, default="other")
     batch_number = models.CharField(max_length=64, blank=True)
     expiry_date = models.DateField(null=True, blank=True)
-    unit_of_measure = models.CharField(max_length=32, choices=UNITS, default="tablet")
+    # The pack unit stock is counted in (box, packet, piece...). Column name kept for compatibility.
+    unit_of_measure = models.CharField(max_length=32, choices=UNITS, default="piece")
+    # Whole packs on hand (the "Quantity" the manager registers).
     on_hand = models.IntegerField(default=0)
     min_threshold = models.IntegerField(default=5)
+    # Sale price of one whole pack.
     unit_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    cost = models.DecimalField(max_digits=10, decimal_places=2, default=0, db_default=0)
+    # Optional split selling: a pack holds `pack_size` loose units (tablets...).
+    # `on_hand` counts whole packs; `loose_stock` is what is left of an opened pack.
+    pack_size = models.PositiveIntegerField(default=1, db_default=1)
+    loose_unit = models.CharField(max_length=24, blank=True, default="", db_default="")
+    loose_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    loose_stock = models.PositiveIntegerField(default=0, db_default=0)
+    # What was bought in total, and how much of it has been paid for (the rest is supplier credit).
+    received_quantity = models.PositiveIntegerField(default=0, db_default=0)
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0, db_default=0)
+    image_url = models.URLField(max_length=500, blank=True, default="", db_default="")
     is_active = models.BooleanField(default=True)
-    internal_notes = models.TextField(blank=True)
+    internal_notes = models.TextField(blank=True)  # legacy: no longer shown
 
     class Meta:
         ordering = ["name"]

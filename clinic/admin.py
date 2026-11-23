@@ -7,6 +7,7 @@ for model in (
     models.Encounter,
     models.BillableService,
     models.Medicine,
+    models.Supplier,
     models.Department,
     models.EquipmentTicket,
 ):
