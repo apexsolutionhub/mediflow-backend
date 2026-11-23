@@ -50,6 +50,10 @@ M = [
     ("Multivitamin", "vitamins", 0, "box", 15, "200", "140", (30, "Tablet", "7.50"), 26, "MUL-2620", 1, "Box of 30 tablets"),
     ("Vitamin C 500mg", "vitamins", 2, "box", 3, "130", "90", (100, "Tablet", "1.50"), 20, "VTC-2621", 1, "Box of 100 tablets (low stock)"),
     ("Diazepam Injection 10mg", "other", 1, "box", 8, "180", "125", (10, "Ampoule", "20.00"), 16, "DZP-2622", 1, "Box of 10 ampoules"),
+    # Same names from other suppliers/batches, so grouped lists and batch choice can be tried.
+    ("Paracetamol 500mg", "pain_fever", 1, "box", 20, "125", "90", (100, "Tablet", "1.60"), 12, "PCM-2702", 1, "Box of 100 tablets"),
+    ("Paracetamol 500mg", "pain_fever", 2, "box", 10, "118", "82", (100, "Tablet", "1.50"), 30, "PCM-2703", 1, "Box of 100 tablets"),
+    ("Amoxicillin 500mg", "antibiotics", 2, "box", 12, "290", "205", (100, "Capsule", "3.60"), 14, "AMX-2704", 1, "Box of 100 capsules"),
     ("Normal Saline 500ml", "other", 0, "piece", 40, "75", "50", None, 24, "NSL-2623", 1, "IV bag, sold whole"),
 ]
 
