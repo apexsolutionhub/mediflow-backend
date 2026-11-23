@@ -23,16 +23,20 @@ from .models import (
     DoctorChart,
     Encounter,
     EquipmentTicket,
+    LabTestParameter,
     Medicine,
     NurseNote,
+    OrderResultValue,
     OrgManagerMessage,
     OrgManagerThread,
     Patient,
+    RadiologyReport,
     PaymentTransaction,
     Referral,
     RefundTransaction,
 )
 from .serializers import (
+    LabTestParameterSerializer,
     AppointmentSerializer,
     BillableItemSerializer,
     BillableServiceSerializer,
@@ -132,7 +136,16 @@ class EncounterViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         qs = (
             Encounter.objects.filter(clinic_tin=self.get_clinic_tin())
             .select_related("patient", "chart")
-            .prefetch_related("billables", "orders", "payments", "refunds", "nurse_notes")
+            .prefetch_related(
+                "billables",
+                "orders",
+                "orders__radiology_report",
+                "orders__result_values",
+                "orders__billable__service__parameters",
+                "payments",
+                "refunds",
+                "nurse_notes",
+            )
         )
         qs = scope_branch(qs, self.request.user)
         today = self.request.query_params.get("today")
@@ -328,6 +341,34 @@ class BillableServiceViewSet(TenantScopedMixin, viewsets.ModelViewSet):
             )
         instance.delete()
 
+    @action(detail=True, methods=["get", "put"])
+    def parameters(self, request, pk=None):
+        """Read or replace the structured result fields of a lab service."""
+        service = self.get_object()
+        if request.method == "GET":
+            return Response(LabTestParameterSerializer(service.parameters.all(), many=True).data)
+        if role_of(request.user) != "manager":
+            return Response({"detail": "Only the manager can edit test parameters."}, status=403)
+        rows = request.data if isinstance(request.data, list) else request.data.get("parameters")
+        if not isinstance(rows, list):
+            return Response({"detail": "Send a list of parameters."}, status=400)
+        clean = []
+        for index, row in enumerate(rows):
+            ser = LabTestParameterSerializer(data=row)
+            if not ser.is_valid():
+                return Response({"detail": f"Row {index + 1}: {ser.errors}"}, status=400)
+            data = ser.validated_data
+            if data["result_type"] == "choice" and len(LabTestParameter._split(data.get("choices"))) < 2:
+                return Response(
+                    {"detail": f"Row {index + 1}: choice tests need at least two choices."},
+                    status=400,
+                )
+            clean.append(LabTestParameter(service=service, **{**data, "sort_order": index}))
+        with transaction.atomic():
+            service.parameters.all().delete()
+            LabTestParameter.objects.bulk_create(clean)
+        return Response(LabTestParameterSerializer(service.parameters.all(), many=True).data)
+
 
 class PaymentViewSet(TenantScopedMixin, viewsets.GenericViewSet):
     serializer_class = PaymentTransactionSerializer
@@ -440,7 +481,12 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
                 fulfillment=ClinicalOrder.FULFILLMENT_CLINIC,
                 status__in=["PaymentApproved", "InProgress"],
             )
-        return qs.select_related("encounter", "encounter__patient").order_by("-updated_at")
+        return (
+            qs.select_related("encounter", "encounter__patient", "billable", "billable__service")
+            .select_related("radiology_report")
+            .prefetch_related("result_values", "billable__service__parameters")
+            .order_by("-updated_at")
+        )
 
     def perform_create(self, serializer):
         encounter = serializer.validated_data["encounter"]
@@ -557,9 +603,89 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         order = self.get_object()
         if order.status not in {"PaymentApproved", "InProgress"}:
             return Response({"detail": "Order is not ready to complete."}, status=400)
-        order.result_text = request.data.get("result_text", order.result_text)
-        order.status = "Completed"
-        order.save(update_fields=["result_text", "status"])
+        if order.order_type == "radiology":
+            return self._complete_radiology(request, order)
+        params = []
+        if order.order_type == "lab" and order.billable_id and order.billable.service_id:
+            params = list(order.billable.service.parameters.all())
+        if params:
+            # Structured entry: every parameter needs a valid value.
+            raw_values = request.data.get("values") or {}
+            if not isinstance(raw_values, dict):
+                return Response({"detail": "values must be an object keyed by parameter id."}, status=400)
+            rows, errors = [], []
+            for param in params:
+                try:
+                    value, flag = param.evaluate(raw_values.get(str(param.id)))
+                except ValueError as exc:
+                    errors.append(str(exc))
+                    continue
+                rows.append(
+                    OrderResultValue(
+                        order=order,
+                        parameter=param,
+                        name=param.name,
+                        unit=param.unit,
+                        reference_text=param.reference_text,
+                        value=value,
+                        flag=flag,
+                        sort_order=param.sort_order,
+                        entered_by=request.user,
+                    )
+                )
+            if errors:
+                return Response({"detail": " ".join(errors)}, status=400)
+            with transaction.atomic():
+                order.result_values.all().delete()
+                OrderResultValue.objects.bulk_create(rows)
+                order.result_text = chr(10).join(
+                    f"{r.name}: {r.value}{(' ' + r.unit) if r.unit else ''}"
+                    + (f" [{r.flag.upper()}]" if r.flag != "normal" else "")
+                    for r in rows
+                )
+                order.status = "Completed"
+                order.save(update_fields=["result_text", "status"])
+        else:
+            text = (request.data.get("result_text") or "").strip()
+            if not text and not order.result_text:
+                return Response({"detail": "Enter a result before completing."}, status=400)
+            order.result_text = text or order.result_text
+            order.status = "Completed"
+            order.save(update_fields=["result_text", "status"])
+        return Response(ClinicalOrderSerializer(order).data)
+
+    def _complete_radiology(self, request, order):
+        data = request.data
+        findings = (data.get("findings") or "").strip()
+        impression = (data.get("impression") or "").strip()
+        tag = (data.get("tag") or "").strip().lower()
+        if not findings or not impression:
+            return Response({"detail": "Findings and impression are required."}, status=400)
+        if tag not in {"normal", "abnormal", "critical"}:
+            return Response({"detail": "Choose Normal, Abnormal or Critical."}, status=400)
+        attachments = data.get("attachments") or []
+        if not isinstance(attachments, list) or len(attachments) > 10:
+            return Response({"detail": "Attach at most 10 images."}, status=400)
+        clean = []
+        for item in attachments:
+            url = (item.get("url") if isinstance(item, dict) else "") or ""
+            if not url.startswith("https://"):
+                return Response({"detail": "Invalid attachment URL."}, status=400)
+            clean.append({"url": url[:500], "name": str(item.get("name") or "")[:120]})
+        technique = (data.get("technique") or "").strip()
+        with transaction.atomic():
+            RadiologyReport.objects.update_or_create(
+                order=order,
+                defaults=dict(
+                    technique=technique, findings=findings, impression=impression,
+                    tag=tag, attachments=clean, reported_by=request.user,
+                ),
+            )
+            order.result_text = (
+                f"[{tag.upper()}] Impression: {impression}" + chr(10) + f"Findings: {findings}"
+            )
+            order.status = "Completed"
+            order.save(update_fields=["result_text", "status"])
         return Response(ClinicalOrderSerializer(order).data)
 
     @action(detail=True, methods=["post"])

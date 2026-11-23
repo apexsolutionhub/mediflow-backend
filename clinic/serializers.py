@@ -10,10 +10,13 @@ from .models import (
     DoctorChart,
     Encounter,
     EquipmentTicket,
+    LabTestParameter,
     Medicine,
     NurseNote,
+    OrderResultValue,
     Patient,
     PaymentTransaction,
+    RadiologyReport,
     Referral,
     RefundTransaction,
 )
@@ -65,9 +68,53 @@ class RefundTransactionSerializer(serializers.ModelSerializer):
         read_only_fields = ("processed_by",)
 
 
+class LabTestParameterSerializer(serializers.ModelSerializer):
+    reference_text = serializers.CharField(read_only=True)
+    choice_list = serializers.ListField(child=serializers.CharField(), read_only=True)
+
+    class Meta:
+        model = LabTestParameter
+        fields = (
+            "id",
+            "name",
+            "result_type",
+            "unit",
+            "ref_low",
+            "ref_high",
+            "critical_low",
+            "critical_high",
+            "choices",
+            "abnormal_choices",
+            "sort_order",
+            "reference_text",
+            "choice_list",
+        )
+
+
+class OrderResultValueSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrderResultValue
+        fields = ("id", "parameter", "name", "unit", "reference_text", "value", "flag", "sort_order")
+
+
+class RadiologyReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RadiologyReport
+        fields = ("technique", "findings", "impression", "tag", "attachments", "updated_at")
+
+
 class ClinicalOrderSerializer(serializers.ModelSerializer):
     patient_name = serializers.CharField(source="encounter.patient.full_name", read_only=True)
     encounter_number = serializers.CharField(source="encounter.number", read_only=True)
+    result_values = OrderResultValueSerializer(many=True, read_only=True)
+    test_parameters = serializers.SerializerMethodField()
+    radiology_report = RadiologyReportSerializer(read_only=True)
+
+    def get_test_parameters(self, obj):
+        if obj.order_type != "lab" or not obj.billable_id or not obj.billable.service_id:
+            return []
+        params = obj.billable.service.parameters.all()
+        return LabTestParameterSerializer(params, many=True).data
 
     class Meta:
         model = ClinicalOrder
@@ -188,6 +235,8 @@ class EncounterSerializer(serializers.ModelSerializer):
 
 
 class BillableServiceSerializer(serializers.ModelSerializer):
+    parameters = LabTestParameterSerializer(many=True, read_only=True)
+
     class Meta:
         model = BillableService
         fields = "__all__"

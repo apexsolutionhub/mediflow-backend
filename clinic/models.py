@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.conf import settings
 from django.db import models
 
@@ -332,3 +334,137 @@ class OrgManagerMessage(models.Model):
 
     class Meta:
         ordering = ["created_at"]
+
+
+class LabTestParameter(models.Model):
+    """One measurable field of a lab test (e.g. Hemoglobin, Malaria RDT).
+
+    Attached to a lab BillableService so the doctor orders by catalog entry
+    and the technician fills structured values instead of free text.
+    """
+
+    TYPE_NUMERIC = "numeric"
+    TYPE_CHOICE = "choice"
+    TYPE_TEXT = "text"
+    RESULT_TYPES = (
+        (TYPE_NUMERIC, "Numeric"),
+        (TYPE_CHOICE, "Choice (e.g. Positive / Negative)"),
+        (TYPE_TEXT, "Short text"),
+    )
+
+    service = models.ForeignKey(
+        BillableService, on_delete=models.CASCADE, related_name="parameters"
+    )
+    name = models.CharField(max_length=120)
+    result_type = models.CharField(max_length=16, choices=RESULT_TYPES, default=TYPE_NUMERIC)
+    unit = models.CharField(max_length=32, blank=True)
+    ref_low = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    ref_high = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    critical_low = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    critical_high = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    # Comma separated, e.g. "Negative,Positive". abnormal_choices ⊂ choices.
+    choices = models.CharField(max_length=255, blank=True)
+    abnormal_choices = models.CharField(max_length=255, blank=True)
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+
+    @staticmethod
+    def _split(raw):
+        return [c.strip() for c in (raw or "").split(",") if c.strip()]
+
+    @property
+    def choice_list(self):
+        return self._split(self.choices)
+
+    @property
+    def reference_text(self):
+        if self.result_type == self.TYPE_NUMERIC:
+            if self.ref_low is not None and self.ref_high is not None:
+                return f"{self.ref_low.normalize():f} – {self.ref_high.normalize():f}"
+            if self.ref_high is not None:
+                return f"< {self.ref_high.normalize():f}"
+            if self.ref_low is not None:
+                return f"> {self.ref_low.normalize():f}"
+            return ""
+        if self.result_type == self.TYPE_CHOICE:
+            normal = [c for c in self.choice_list if c not in self._split(self.abnormal_choices)]
+            return " / ".join(normal)
+        return ""
+
+    def evaluate(self, raw_value):
+        """Return (clean_value, flag). Raises ValueError for invalid input."""
+        value = (raw_value if raw_value is not None else "").__str__().strip()
+        if not value:
+            raise ValueError(f"{self.name}: value required.")
+        if self.result_type == self.TYPE_NUMERIC:
+            try:
+                number = Decimal(value)
+            except Exception:
+                raise ValueError(f"{self.name}: enter a number.")
+            flag = "normal"
+            if self.critical_low is not None and number < self.critical_low:
+                flag = "critical"
+            elif self.critical_high is not None and number > self.critical_high:
+                flag = "critical"
+            elif self.ref_low is not None and number < self.ref_low:
+                flag = "low"
+            elif self.ref_high is not None and number > self.ref_high:
+                flag = "high"
+            return value, flag
+        if self.result_type == self.TYPE_CHOICE:
+            if value not in self.choice_list:
+                raise ValueError(f"{self.name}: choose one of {', '.join(self.choice_list)}.")
+            return value, "abnormal" if value in self._split(self.abnormal_choices) else "normal"
+        return value[:255], "normal"
+
+
+class OrderResultValue(models.Model):
+    """Recorded value for one parameter of a lab order (snapshot of the definition)."""
+
+    FLAGS = (
+        ("normal", "Normal"),
+        ("low", "Low"),
+        ("high", "High"),
+        ("critical", "Critical"),
+        ("abnormal", "Abnormal"),
+    )
+
+    order = models.ForeignKey(ClinicalOrder, on_delete=models.CASCADE, related_name="result_values")
+    parameter = models.ForeignKey(
+        LabTestParameter, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    name = models.CharField(max_length=120)
+    unit = models.CharField(max_length=32, blank=True)
+    reference_text = models.CharField(max_length=120, blank=True)
+    value = models.CharField(max_length=255)
+    flag = models.CharField(max_length=16, choices=FLAGS, default="normal")
+    sort_order = models.PositiveIntegerField(default=0)
+    entered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+
+
+class RadiologyReport(models.Model):
+    """Structured imaging report for a radiology order."""
+
+    TAGS = (("normal", "Normal"), ("abnormal", "Abnormal"), ("critical", "Critical"))
+
+    order = models.OneToOneField(
+        ClinicalOrder, on_delete=models.CASCADE, related_name="radiology_report"
+    )
+    technique = models.TextField(blank=True)
+    findings = models.TextField()
+    impression = models.TextField()
+    tag = models.CharField(max_length=16, choices=TAGS, default="normal")
+    # List of {"url": "https://...", "name": "..."} (images uploaded by the unit).
+    attachments = models.JSONField(default=list, blank=True)
+    reported_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
