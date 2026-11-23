@@ -197,3 +197,52 @@ class ReportsRangeTests(APITestCase):
     def test_non_manager_forbidden(self, _perm):
         self.client.force_authenticate(self.doc)
         self.assertEqual(self.client.get("/api/clinic/reports/", {"from": "2020-01-01"}).status_code, 403)
+
+
+@mock.patch("tenants.permissions.TenantBillingAccessPermission.has_permission", return_value=True)
+class ReportsAnchorDateTests(APITestCase):
+    """Calendar picks a day; the period selector widens it to the window containing that day."""
+
+    def setUp(self):
+        user = get_user_model().objects.create_user("mgr3", password="x")
+        UserProfile.objects.create(user=user, clinic_tin=TIN, role="manager", branch_name="Main")
+        self.client.force_authenticate(user)
+
+    def window(self, period, day):
+        res = self.client.get("/api/clinic/reports/", {"period": period, "date": day})
+        self.assertEqual(res.status_code, 200, res.data)
+        return res.data["start_date"], res.data["end_date"], res.data["period"]
+
+    def test_daily_is_that_day(self, _perm):
+        self.assertEqual(self.window("day", "2020-03-03"), ("2020-03-03", "2020-03-03", "day"))
+
+    def test_monthly_is_that_months(self, _perm):
+        self.assertEqual(self.window("month", "2020-02-15"), ("2020-02-01", "2020-02-29", "month"))
+
+    def test_quarterly_half_and_yearly(self, _perm):
+        self.assertEqual(self.window("quarter", "2020-05-10")[:2], ("2020-04-01", "2020-06-30"))
+        self.assertEqual(self.window("half_year", "2020-08-01")[:2], ("2020-07-01", "2020-12-31"))
+        self.assertEqual(self.window("half_year", "2020-02-01")[:2], ("2020-01-01", "2020-06-30"))
+        self.assertEqual(self.window("year", "2020-03-03")[:2], ("2020-01-01", "2020-12-31"))
+
+    def test_current_period_is_capped_at_today(self, _perm):
+        from django.utils import timezone
+
+        today = timezone.localdate()
+        start, end, _ = self.window("month", today.isoformat())
+        self.assertEqual(end, today.isoformat())
+        self.assertEqual(start, today.replace(day=1).isoformat())
+
+    def test_future_date_is_clamped_and_bad_date_rejected(self, _perm):
+        from django.utils import timezone
+
+        today = timezone.localdate().isoformat()
+        self.assertEqual(self.window("day", "2999-01-01")[:2], (today, today))
+        res = self.client.get("/api/clinic/reports/", {"period": "day", "date": "yesterday"})
+        self.assertEqual(res.status_code, 400)
+
+    def test_without_date_behaves_as_before(self, _perm):
+        from django.utils import timezone
+
+        res = self.client.get("/api/clinic/reports/", {"period": "month"})
+        self.assertEqual(res.data["start_date"], timezone.localdate().replace(day=1).isoformat())

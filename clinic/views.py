@@ -1037,30 +1037,55 @@ class DashboardView(APIView):
         )
 
 
-def _report_period_bounds(period: str):
+def _month_end(year: int, month: int):
+    import calendar
+    from datetime import date
+
+    return date(year, month, calendar.monthrange(year, month)[1])
+
+
+def _report_period_bounds(period: str, anchor=None):
+    """Window of `period` that contains `anchor` (default: today), capped at today."""
     today = timezone.localdate()
+    anchor = min(anchor or today, today)
     key = (period or "day").strip().lower().replace("-", "_")
     if key in {"day", "daily"}:
-        start = today
-        label = "Daily"
+        start, end, label = anchor, anchor, "Daily"
     elif key in {"month", "monthly"}:
-        start = today.replace(day=1)
+        start = anchor.replace(day=1)
+        end = _month_end(anchor.year, anchor.month)
         label = "Monthly"
     elif key in {"quarter", "quarterly"}:
-        q = (today.month - 1) // 3
-        start = today.replace(month=q * 3 + 1, day=1)
+        q = (anchor.month - 1) // 3
+        start = anchor.replace(month=q * 3 + 1, day=1)
+        end = _month_end(anchor.year, q * 3 + 3)
         label = "Quarterly"
     elif key in {"half", "half_year", "halfyear"}:
-        start = today.replace(month=1 if today.month <= 6 else 7, day=1)
+        first = anchor.month <= 6
+        start = anchor.replace(month=1 if first else 7, day=1)
+        end = _month_end(anchor.year, 6 if first else 12)
         label = "Half-year"
     elif key in {"year", "yearly", "annual"}:
-        start = today.replace(month=1, day=1)
+        start = anchor.replace(month=1, day=1)
+        end = _month_end(anchor.year, 12)
         label = "Yearly"
     else:
-        start = today
-        label = "Daily"
+        start, end, label = anchor, anchor, "Daily"
         key = "day"
-    return key, label, start, today
+    return key, label, start, min(end, today)
+
+
+def _parse_anchor_date(params):
+    """?date=YYYY-MM-DD -> date, None when absent. ValueError when malformed."""
+    raw = (params.get("date") or "").strip()
+    if not raw:
+        return None
+    from datetime import date
+
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        raise ValueError("Date must be YYYY-MM-DD.")
 
 
 MAX_CUSTOM_RANGE_DAYS = 731
@@ -1096,13 +1121,14 @@ class ReportsView(APIView):
             return Response({"detail": "Only managers can open clinic reports."}, status=403)
         tin = tin_of(request.user)
         branch = branch_of(request.user)
-        period_key, period_label, start, end = _report_period_bounds(
-            request.query_params.get("period") or "day"
-        )
         try:
+            anchor = _parse_anchor_date(request.query_params)
             custom = _parse_custom_range(request.query_params)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=400)
+        period_key, period_label, start, end = _report_period_bounds(
+            request.query_params.get("period") or "day", anchor
+        )
         if custom:
             start, end = custom
             period_key, period_label = "custom", "Custom range"
@@ -1189,6 +1215,7 @@ class ReportsView(APIView):
             {
                 "period": period_key,
                 "period_label": period_label,
+                "anchor_date": min(anchor or timezone.localdate(), timezone.localdate()).isoformat(),
                 "start_date": start.isoformat(),
                 "end_date": end.isoformat(),
                 "branch_name": branch,
