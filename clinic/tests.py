@@ -246,3 +246,100 @@ class ReportsAnchorDateTests(APITestCase):
 
         res = self.client.get("/api/clinic/reports/", {"period": "month"})
         self.assertEqual(res.data["start_date"], timezone.localdate().replace(day=1).isoformat())
+
+
+@mock.patch("tenants.permissions.TenantBillingAccessPermission.has_permission", return_value=True)
+class DispenseOrderedMedicineTests(APITestCase):
+    """The pharmacist dispenses exactly the medicine the doctor ordered, as billed."""
+
+    def setUp(self):
+        from clinic.models import BillableItem, Medicine
+
+        User = get_user_model()
+        for name, role in (("rxdoc", "doctor"), ("rxpharm", "pharmacist"), ("rxrec", "reception")):
+            u = User.objects.create_user(name, password="x")
+            UserProfile.objects.create(user=u, clinic_tin=TIN, role=role, branch_name="Main")
+        self.doc = User.objects.get(username="rxdoc")
+        self.pharm = User.objects.get(username="rxpharm")
+        self.rec = User.objects.get(username="rxrec")
+        patient = Patient.objects.create(clinic_tin=TIN, branch_name="Main", mrn="RX1", full_name="P")
+        self.enc = Encounter.objects.create(
+            clinic_tin=TIN, branch_name="Main", number="RX-1", patient=patient, arrival_type="new"
+        )
+        self.amox = Medicine.objects.create(
+            clinic_tin=TIN, branch_name="Main", name="Amoxicillin 500mg", on_hand=10, unit_price=8
+        )
+        self.other = Medicine.objects.create(
+            clinic_tin=TIN, branch_name="Main", name="Ibuprofen 400mg", on_hand=50, unit_price=5
+        )
+        self.BillableItem = BillableItem
+
+    def _order(self, medicine, approved=True, quantity=1):
+        bill = self.BillableItem.objects.create(
+            encounter=self.enc, description="Rx", department="Pharmacy", unit_price=8,
+            quantity=quantity, payment_status="PaymentApproved" if approved else "AwaitingPayment",
+        )
+        return ClinicalOrder.objects.create(
+            encounter=self.enc, order_type="prescription", details="x", medicine=medicine,
+            status="PaymentApproved" if approved else "AwaitingPayment", billable=bill,
+            fulfillment=ClinicalOrder.FULFILLMENT_CLINIC,
+        )
+
+    def _dispense(self, order, body=None, user=None):
+        self.client.force_authenticate(user or self.pharm)
+        return self.client.post(f"/api/clinic/orders/{order.id}/dispense/", body or {}, format="json")
+
+    def test_stocks_out_the_ordered_medicine_by_the_billed_quantity(self, _perm):
+        order = self._order(self.amox, quantity=3)
+        res = self._dispense(order)
+        self.assertEqual(res.status_code, 200, res.data)
+        self.amox.refresh_from_db()
+        self.assertEqual(self.amox.on_hand, 7)
+        self.assertEqual(res.data["status"], "Dispensed")
+
+    def test_request_body_cannot_redirect_stock_to_another_medicine(self, _perm):
+        order = self._order(self.amox)
+        res = self._dispense(order, {"medicine": self.other.id, "quantity": 40})
+        self.assertEqual(res.status_code, 200, res.data)
+        self.amox.refresh_from_db()
+        self.other.refresh_from_db()
+        self.assertEqual((self.amox.on_hand, self.other.on_hand), (9, 50))
+
+    def test_insufficient_stock_is_rejected_and_nothing_changes(self, _perm):
+        order = self._order(self.amox, quantity=11)
+        res = self._dispense(order)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("Insufficient stock", res.data["detail"])
+        self.amox.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual((self.amox.on_hand, order.status), (10, "PaymentApproved"))
+
+    def test_unpaid_prescription_cannot_be_dispensed(self, _perm):
+        order = self._order(self.amox, approved=False)
+        self.assertEqual(self._dispense(order).status_code, 400)
+        self.amox.refresh_from_db()
+        self.assertEqual(self.amox.on_hand, 10)
+
+    def test_prescription_without_linked_medicine_is_rejected(self, _perm):
+        order = self._order(None)
+        res = self._dispense(order)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("not linked", res.data["detail"])
+
+    def test_cannot_dispense_twice(self, _perm):
+        order = self._order(self.amox)
+        self.assertEqual(self._dispense(order).status_code, 200)
+        self.assertEqual(self._dispense(order).status_code, 400)
+        self.amox.refresh_from_db()
+        self.assertEqual(self.amox.on_hand, 9)
+
+    def test_only_pharmacist_or_manager_may_dispense(self, _perm):
+        order = self._order(self.amox)
+        self.assertEqual(self._dispense(order, user=self.rec).status_code, 403)
+
+    def test_order_exposes_medicine_details_for_the_screen(self, _perm):
+        order = self._order(self.amox, quantity=2)
+        self.client.force_authenticate(self.pharm)
+        res = self.client.get(f"/api/clinic/orders/{order.id}/")
+        self.assertEqual(res.data["medicine_name"], "Amoxicillin 500mg")
+        self.assertEqual((res.data["medicine_on_hand"], res.data["dispense_quantity"]), (10, 2))

@@ -110,8 +110,27 @@ class ClinicalOrderSerializer(serializers.ModelSerializer):
     test_parameters = serializers.SerializerMethodField()
     radiology_report = RadiologyReportSerializer(read_only=True)
     test_name = serializers.SerializerMethodField()
+    medicine_name = serializers.SerializerMethodField()
+    medicine_on_hand = serializers.SerializerMethodField()
+    medicine_unit = serializers.SerializerMethodField()
+    dispense_quantity = serializers.SerializerMethodField()
     abnormal_count = serializers.SerializerMethodField()
     has_critical = serializers.SerializerMethodField()
+
+    def get_medicine_name(self, obj):
+        return obj.medicine.name if obj.medicine_id else ""
+
+    def get_medicine_on_hand(self, obj):
+        return obj.medicine.on_hand if obj.medicine_id else None
+
+    def get_medicine_unit(self, obj):
+        return obj.medicine.unit_of_measure if obj.medicine_id else ""
+
+    def get_dispense_quantity(self, obj):
+        """Units that will be sold and stocked out: what was billed (at least 1)."""
+        if obj.order_type != "prescription":
+            return None
+        return max(1, int(obj.billable.quantity)) if obj.billable_id else 1
 
     def get_test_name(self, obj):
         billable = obj.billable

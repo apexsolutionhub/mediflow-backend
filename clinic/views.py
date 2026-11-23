@@ -142,6 +142,7 @@ class EncounterViewSet(TenantScopedMixin, viewsets.ModelViewSet):
                 "orders__radiology_report",
                 "orders__result_values",
                 "orders__billable__service__parameters",
+                "orders__medicine",
                 "payments",
                 "refunds",
                 "nurse_notes",
@@ -482,7 +483,9 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
                 status__in=["PaymentApproved", "InProgress"],
             )
         return (
-            qs.select_related("encounter", "encounter__patient", "billable", "billable__service")
+            qs.select_related(
+                "encounter", "encounter__patient", "billable", "billable__service", "medicine"
+            )
             .select_related("radiology_report")
             .prefetch_related("result_values", "billable__service__parameters")
             .order_by("-updated_at")
@@ -697,28 +700,49 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def dispense(self, request, pk=None):
+        """Sell and stock out the medicine the doctor ordered, exactly as billed.
+
+        The pharmacist does not choose a medicine or quantity: the order already says
+        which medicine (order.medicine) and the billed line says how many units.
+        Anything sent in the request body is ignored.
+        """
         if role_of(request.user) not in {"pharmacist", "manager"}:
             return Response({"detail": "Forbidden."}, status=403)
         order = self.get_object()
-        if order.status != "PaymentApproved" and order.status != "InProgress":
-            return Response({"detail": "Rx is not payment-approved."}, status=400)
         if order.order_type != "prescription":
             return Response({"detail": "Not a prescription."}, status=400)
-        medicine_id = request.data.get("medicine")
-        qty = int(request.data.get("quantity") or 1)
-        medicine = Medicine.objects.filter(
-            pk=medicine_id,
-            clinic_tin=self.get_clinic_tin(),
-            branch_name__iexact=self.get_branch_name(),
-        ).first()
-        if not medicine:
-            return Response({"detail": "Medicine not found."}, status=404)
-        if medicine.on_hand < qty:
-            return Response({"detail": "Insufficient stock."}, status=400)
-        medicine.on_hand -= qty
-        medicine.save(update_fields=["on_hand"])
-        order.status = "Dispensed"
-        order.save(update_fields=["status"])
+        if order.status not in {"PaymentApproved", "InProgress"}:
+            return Response({"detail": "Rx is not payment-approved."}, status=400)
+        if not order.medicine_id:
+            return Response(
+                {
+                    "detail": "This prescription is not linked to a medicine in the clinic "
+                    "inventory. Ask the doctor to re-issue it from the medicine list."
+                },
+                status=400,
+            )
+        qty = max(1, int(order.billable.quantity)) if order.billable_id else 1
+        with transaction.atomic():
+            # Lock the stock row so two dispenses cannot both pass the stock check.
+            medicine = Medicine.objects.select_for_update().filter(
+                pk=order.medicine_id,
+                clinic_tin=self.get_clinic_tin(),
+                branch_name__iexact=self.get_branch_name(),
+            ).first()
+            if not medicine:
+                return Response({"detail": "Medicine not found in this branch."}, status=404)
+            if medicine.on_hand < qty:
+                return Response(
+                    {
+                        "detail": f"Insufficient stock for {medicine.name}: "
+                        f"{medicine.on_hand} on hand, {qty} needed."
+                    },
+                    status=400,
+                )
+            medicine.on_hand -= qty
+            medicine.save(update_fields=["on_hand"])
+            order.status = "Dispensed"
+            order.save(update_fields=["status"])
         return Response(ClinicalOrderSerializer(order).data)
 
 
