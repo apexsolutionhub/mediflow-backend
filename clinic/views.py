@@ -27,6 +27,7 @@ from .models import (
     EquipmentTicket,
     LabTestParameter,
     Medicine,
+    MedicineDamage,
     NurseNote,
     OrderResultValue,
     OrgManagerMessage,
@@ -49,6 +50,7 @@ from .serializers import (
     DoctorChartSerializer,
     EncounterSerializer,
     EquipmentTicketSerializer,
+    MedicineDamageSerializer,
     MedicineSerializer,
     NurseNoteSerializer,
     PatientSerializer,
@@ -921,6 +923,76 @@ class MedicineViewSet(ManagerWritesMixin, TenantScopedMixin, viewsets.ModelViewS
             MedicineSerializer(saved, many=True, context=self.get_serializer_context()).data,
             status=201,
         )
+
+
+class MedicineDamageViewSet(ManagerWritesMixin, TenantScopedMixin, viewsets.ModelViewSet):
+    """Damaged stock. Recording, changing or deleting an entry moves the medicine's stock to match."""
+
+    serializer_class = MedicineDamageSerializer
+
+    def get_queryset(self):
+        qs = scope_branch(
+            MedicineDamage.objects.filter(clinic_tin=self.get_clinic_tin()).select_related(
+                "medicine", "recorded_by"
+            ),
+            self.request.user,
+        )
+        medicine = self.request.query_params.get("medicine")
+        if medicine:
+            qs = qs.filter(medicine_id=medicine)
+        return qs
+
+    def _locked_medicine(self, medicine_id):
+        medicine = (
+            scope_branch(
+                Medicine.objects.select_for_update().filter(clinic_tin=self.get_clinic_tin()),
+                self.request.user,
+            )
+            .filter(pk=medicine_id)
+            .first()
+        )
+        if not medicine:
+            raise ValidationError({"medicine": ["Medicine not found."]})
+        return medicine
+
+    @staticmethod
+    def _take(medicine, quantity, sale_unit):
+        try:
+            stock.deduct(medicine, quantity, sale_unit)
+        except stock.StockError as exc:
+            raise ValidationError({"quantity": [exc.message]})
+        medicine.save(update_fields=stock.STOCK_FIELDS)
+
+    def perform_create(self, serializer):
+        data = serializer.validated_data
+        with transaction.atomic():
+            medicine = self._locked_medicine(data["medicine"].pk)
+            self._take(medicine, data["quantity"], data.get("sale_unit", "pack"))
+            serializer.save(
+                clinic_tin=medicine.clinic_tin,
+                branch_name=medicine.branch_name,
+                medicine=medicine,
+                recorded_by=self.request.user,
+            )
+
+    def perform_update(self, serializer):
+        old = serializer.instance
+        data = serializer.validated_data
+        with transaction.atomic():
+            medicine = self._locked_medicine(old.medicine_id)
+            if "medicine" in data and data["medicine"].pk != old.medicine_id:
+                raise ValidationError({"medicine": ["A damage entry can't be moved to another medicine."]})
+            stock.restock(medicine, old.quantity, old.sale_unit)
+            self._take(medicine, data.get("quantity", old.quantity), data.get("sale_unit", old.sale_unit))
+            serializer.save(medicine=medicine)
+
+    def perform_destroy(self, instance):
+        # Removing a wrong entry puts the stock back.
+        with transaction.atomic():
+            medicine = self._locked_medicine(instance.medicine_id)
+            stock.restock(medicine, instance.quantity, instance.sale_unit)
+            medicine.save(update_fields=stock.STOCK_FIELDS)
+            instance.delete()
 
 
 class DepartmentViewSet(TenantScopedMixin, viewsets.ModelViewSet):

@@ -313,3 +313,79 @@ class PrescribeAndDispenseLooseTests(APITestCase):
         self.med.refresh_from_db()
         self.plain.refresh_from_db()
         self.assertEqual((self.med.on_hand, self.med.loose_stock, self.plain.on_hand), (3, 8, 3))
+
+
+@mock.patch(PERM, return_value=True)
+class DamageAndActiveTests(APITestCase):
+    def setUp(self):
+        self.mgr = _make_user("dmgr", "manager")
+        self.phar = _make_user("dphar", "pharmacist")
+        sup = Supplier.objects.create(
+            clinic_tin=TIN, branch_name="Main", supplier_name="S1", supplier_phone="0911"
+        )
+        self.med = Medicine.objects.create(
+            clinic_tin=TIN, branch_name="Main", supplier=sup, name="Paracetamol", batch_number="B1",
+            unit_of_measure="box", on_hand=5, unit_price=100, cost=60, pack_size=10, loose_unit="Tablet",
+            received_quantity=5, paid_amount=300,
+        )
+
+    def damage(self, **body):
+        self.client.force_authenticate(self.mgr)
+        payload = {"medicine": self.med.id, "quantity": 1, "sale_unit": "pack", "reason": "Wet"}
+        payload.update(body)
+        return self.client.post("/api/clinic/medicine-damages/", payload, format="json")
+
+    def test_damage_deducts_packs_and_loose(self, _perm):
+        self.assertEqual(self.damage(quantity=1).status_code, 201)
+        self.med.refresh_from_db()
+        self.assertEqual((self.med.on_hand, self.med.loose_stock), (4, 0))
+        self.assertEqual(self.damage(quantity=3, sale_unit="loose").status_code, 201)
+        self.med.refresh_from_db()
+        self.assertEqual((self.med.on_hand, self.med.loose_stock), (3, 7))
+
+    def test_cannot_damage_more_than_in_stock(self, _perm):
+        res = self.damage(quantity=6)
+        self.assertEqual(res.status_code, 400)
+        self.med.refresh_from_db()
+        self.assertEqual(self.med.on_hand, 5)
+
+    def test_edit_adjusts_and_delete_restores(self, _perm):
+        entry = self.damage(quantity=2).json()
+        self.client.force_authenticate(self.mgr)
+        res = self.client.patch(
+            f"/api/clinic/medicine-damages/{entry['id']}/", {"quantity": 4}, format="json"
+        )
+        self.assertEqual(res.status_code, 200)
+        self.med.refresh_from_db()
+        self.assertEqual(self.med.on_hand, 1)
+        res = self.client.delete(f"/api/clinic/medicine-damages/{entry['id']}/")
+        self.assertEqual(res.status_code, 204)
+        self.med.refresh_from_db()
+        self.assertEqual(self.med.on_hand, 5)
+
+    def test_failed_edit_keeps_stock(self, _perm):
+        entry = self.damage(quantity=2).json()
+        res = self.client.patch(
+            f"/api/clinic/medicine-damages/{entry['id']}/", {"quantity": 9}, format="json"
+        )
+        self.assertEqual(res.status_code, 400)
+        self.med.refresh_from_db()
+        self.assertEqual(self.med.on_hand, 3)
+
+    def test_only_manager_records_damage(self, _perm):
+        self.client.force_authenticate(self.phar)
+        res = self.client.post(
+            "/api/clinic/medicine-damages/", {"medicine": self.med.id, "quantity": 1}, format="json"
+        )
+        self.assertEqual(res.status_code, 403)
+
+    def test_finished_stock_turns_inactive_and_restock_reactivates(self, _perm):
+        self.assertTrue(self.med.is_active)
+        self.assertEqual(self.damage(quantity=5).status_code, 201)
+        self.med.refresh_from_db()
+        self.assertFalse(self.med.is_active)
+        entry_id = self.client.get("/api/clinic/medicine-damages/", {"medicine": self.med.id}).json()
+        rows = entry_id["results"] if isinstance(entry_id, dict) else entry_id
+        self.client.delete(f"/api/clinic/medicine-damages/{rows[0]['id']}/")
+        self.med.refresh_from_db()
+        self.assertTrue(self.med.is_active)

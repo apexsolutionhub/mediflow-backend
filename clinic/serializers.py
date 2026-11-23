@@ -17,6 +17,7 @@ from .models import (
     NurseNote,
     OrderResultValue,
     Patient,
+    MedicineDamage,
     PaymentTransaction,
     RadiologyReport,
     Referral,
@@ -339,6 +340,7 @@ class MedicineSerializer(serializers.ModelSerializer):
             "payment_status",
             "loose_unit_price",
             "stock_text",
+            "is_active",
         ]
 
     def __init__(self, *args, **kwargs):
@@ -460,6 +462,37 @@ class MedicineSerializer(serializers.ModelSerializer):
 
     def get_supplier_email(self, obj):
         return obj.supplier.supplier_email if obj.supplier_id else ""
+
+
+class MedicineDamageSerializer(serializers.ModelSerializer):
+    medicine_name = serializers.CharField(source="medicine.name", read_only=True)
+    quantity_text = serializers.SerializerMethodField()
+    recorded_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = MedicineDamage
+        fields = [
+            "id",
+            "medicine",
+            "medicine_name",
+            "quantity",
+            "sale_unit",
+            "quantity_text",
+            "reason",
+            "recorded_by_name",
+            "created_at",
+        ]
+        read_only_fields = ["id", "medicine_name", "quantity_text", "recorded_by_name", "created_at"]
+        extra_kwargs = {"quantity": {"min_value": 1}}
+
+    def get_quantity_text(self, obj):
+        from . import stock
+
+        word = stock.loose_label(obj.medicine) if obj.sale_unit == "loose" else stock.pack_label(obj.medicine)
+        return f"{obj.quantity} {stock._plural(word, obj.quantity)}"
+
+    def get_recorded_by_name(self, obj):
+        return obj.recorded_by.get_username() if obj.recorded_by_id else ""
 
 
 class EquipmentTicketSerializer(serializers.ModelSerializer):

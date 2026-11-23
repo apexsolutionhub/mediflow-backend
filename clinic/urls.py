@@ -9,6 +9,7 @@ from .views import (
     DashboardView,
     DepartmentViewSet,
     EncounterViewSet,
+    MedicineDamageViewSet,
     MedicineViewSet,
     NurseNoteViewSet,
     OrderViewSet,
@@ -33,6 +34,7 @@ router.register("charts", ChartViewSet, basename="chart")
 router.register("nurse-notes", NurseNoteViewSet, basename="nurse-note")
 router.register("appointments", AppointmentViewSet, basename="appointment")
 router.register("medicines", MedicineViewSet, basename="medicine")
+router.register("medicine-damages", MedicineDamageViewSet, basename="medicine-damage")
 router.register("suppliers", SupplierViewSet, basename="supplier")
 router.register("departments", DepartmentViewSet, basename="department")
 router.register("branches", ClinicBranchViewSet, basename="branch")

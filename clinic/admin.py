@@ -8,6 +8,7 @@ for model in (
     models.BillableService,
     models.Medicine,
     models.Supplier,
+    models.MedicineDamage,
     models.Department,
     models.EquipmentTicket,
 ):

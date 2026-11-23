@@ -63,7 +63,7 @@ class Encounter(models.Model):
     STATUS_OPEN = "open"
     STATUS_ACTIVE = "active"
     STATUS_CLOSED = "closed"
-    ARRIVAL_CHOICES = (("new", "New"), ("returning", "Returning"), ("referred", "Referred"))
+    ARRIVAL_CHOICES = (("new", "New"), ("returning", "Returning"))
 
     clinic_tin = models.CharField(max_length=50, db_index=True)
     branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
@@ -309,6 +309,35 @@ class Medicine(models.Model):
 
     class Meta:
         ordering = ["name"]
+
+    def save(self, *args, **kwargs):
+        # A line is active while it has stock; a finished line drops out of the lists.
+        self.is_active = self.on_hand > 0 or self.loose_stock > 0
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and {"on_hand", "loose_stock"} & set(update_fields):
+            kwargs["update_fields"] = list(set(update_fields) | {"is_active"})
+        super().save(*args, **kwargs)
+
+
+class MedicineDamage(models.Model):
+    """Stock written off as damaged (broken, expired, spoiled...). Recording one deducts the stock."""
+
+    SALE_UNITS = (("pack", "Pack"), ("loose", "Loose unit"))
+
+    clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    medicine = models.ForeignKey(Medicine, on_delete=models.CASCADE, related_name="damages")
+    quantity = models.PositiveIntegerField()
+    sale_unit = models.CharField(max_length=8, choices=SALE_UNITS, default="pack")
+    reason = models.CharField(max_length=255, blank=True, default="")
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
 
 
 class EquipmentTicket(models.Model):
