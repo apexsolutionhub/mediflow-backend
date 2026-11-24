@@ -14,6 +14,16 @@ def normalize_ops_mode(raw) -> str:
     return TenantAccount.OPS_MODE_ONLINE
 
 
+def generate_clinic_tin() -> str:
+    """A unique placeholder TIN for clinics that sign up without one (e.g. GEN-4F9A21C7B0)."""
+    import secrets
+
+    while True:
+        tin = f"GEN-{secrets.token_hex(5).upper()}"
+        if not TenantAccount.objects.filter(clinic_tin=tin).exists():
+            return tin
+
+
 def resolve_tenant_account(clinic_tin: str) -> TenantAccount | None:
     """Billing account for this operational TIN (each branch has its own subscription)."""
     tin = (clinic_tin or "").strip()

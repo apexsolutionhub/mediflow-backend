@@ -16,7 +16,18 @@ User = get_user_model()
 @api_view(["GET"])
 @permission_classes([permissions.AllowAny])
 def health(_request):
-    return Response({"status": "ok"})
+    """Liveness for the cloud; on a clinic server the host starter also waits on the database."""
+    from django.conf import settings
+    from django.db import connection
+
+    node_mode = getattr(settings, "NODE_MODE", "cloud")
+    if node_mode != "clinic":
+        return Response({"status": "ok"})
+    try:
+        connection.ensure_connection()
+    except Exception:
+        return Response({"status": "degraded", "node_mode": node_mode, "database": False}, status=503)
+    return Response({"status": "ok", "node_mode": node_mode, "database": True})
 
 
 class UserViewSet(viewsets.ModelViewSet):

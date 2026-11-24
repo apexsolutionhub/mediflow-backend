@@ -14,7 +14,7 @@ from rest_framework.views import APIView
 
 from tenants.permissions import TenantBillingAccessPermission
 
-from . import stock
+from . import ledger, stock
 from .models import (
     Appointment,
     BillableItem,
@@ -768,6 +768,7 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
             except stock.StockError as exc:
                 return Response({"detail": exc.message}, status=400)
             medicine.save(update_fields=stock.STOCK_FIELDS)
+            ledger.record_movement(medicine, "dispense", f"order:{order.pk}", request.user)
             order.status = "Dispensed"
             order.save(update_fields=["status"])
         return Response(ClinicalOrderSerializer(order).data)
@@ -968,12 +969,13 @@ class MedicineDamageViewSet(ManagerWritesMixin, TenantScopedMixin, viewsets.Mode
         with transaction.atomic():
             medicine = self._locked_medicine(data["medicine"].pk)
             self._take(medicine, data["quantity"], data.get("sale_unit", "pack"))
-            serializer.save(
+            entry = serializer.save(
                 clinic_tin=medicine.clinic_tin,
                 branch_name=medicine.branch_name,
                 medicine=medicine,
                 recorded_by=self.request.user,
             )
+            ledger.record_movement(medicine, "damage", f"damage:{entry.pk}", self.request.user)
 
     def perform_update(self, serializer):
         old = serializer.instance
@@ -984,7 +986,8 @@ class MedicineDamageViewSet(ManagerWritesMixin, TenantScopedMixin, viewsets.Mode
                 raise ValidationError({"medicine": ["A damage entry can't be moved to another medicine."]})
             stock.restock(medicine, old.quantity, old.sale_unit)
             self._take(medicine, data.get("quantity", old.quantity), data.get("sale_unit", old.sale_unit))
-            serializer.save(medicine=medicine)
+            entry = serializer.save(medicine=medicine)
+            ledger.record_movement(medicine, "damage", f"damage:{entry.pk}", self.request.user)
 
     def perform_destroy(self, instance):
         # Removing a wrong entry puts the stock back.
@@ -992,6 +995,7 @@ class MedicineDamageViewSet(ManagerWritesMixin, TenantScopedMixin, viewsets.Mode
             medicine = self._locked_medicine(instance.medicine_id)
             stock.restock(medicine, instance.quantity, instance.sale_unit)
             medicine.save(update_fields=stock.STOCK_FIELDS)
+            ledger.record_movement(medicine, "adjust", f"damage-removed:{instance.pk}", self.request.user)
             instance.delete()
 
 

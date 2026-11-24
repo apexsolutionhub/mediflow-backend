@@ -58,6 +58,31 @@ class SubmitTenantPaymentView(APIView):
             )
 
         access = resolve_login_access(tenant, role=profile.role)
+
+        # Hard lockout on a clinic server: payment proof goes to the cloud (HTTPS), never to the local copy.
+        from clinic import sync_billing
+        from clinic.sync_client import TransportError
+
+        if access.access_mode == "payment_portal" and sync_billing.proxy_enabled():
+            try:
+                live = sync_billing.cloud_call(
+                    "billing/submit",
+                    {
+                        "payment_kind": request.data.get("payment_kind", ""),
+                        "payment_channel": request.data.get("payment_channel", ""),
+                        "transaction_ref": request.data.get("transaction_ref", ""),
+                    },
+                )
+            except TransportError as exc:
+                if exc.status and exc.status < 500:
+                    return Response({"detail": str(exc)}, status=exc.status)
+                return Response(
+                    {"detail": "Payment proof needs the internet while access is locked. Try again when online."},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            sync_billing.adopt_cloud_tenant(tenant.clinic_tin, live.get("tenant"))
+            return Response(live["response"], status=status.HTTP_201_CREATED)
+
         payment_kind = (request.data.get("payment_kind") or access.payment_kind or "").strip().lower()
         if not payment_kind:
             if not tenant.setup_fee_approved:
@@ -105,6 +130,23 @@ class BillingMeView(APIView):
             return Response({"detail": "Tenant account not found."}, status=status.HTTP_404_NOT_FOUND)
 
         access = resolve_login_access(tenant, role=profile.role)
+        from clinic.sync_gate import apply_gate, gate_for_profile
+
+        gate = gate_for_profile(profile, tenant)
+        access = apply_gate(access, gate, profile.role)
+
+        # Hard lockout on a clinic server: ask the cloud, so an Apex approval shows up at once.
+        from clinic import sync_billing
+        from clinic.sync_client import TransportError
+
+        if access.access_mode == "payment_portal" and sync_billing.proxy_enabled():
+            try:
+                live = sync_billing.cloud_call("billing/status", {})
+            except TransportError:
+                live = None
+            if live:
+                sync_billing.adopt_cloud_tenant(tenant.clinic_tin, live.get("tenant"))
+                return Response({**live["response"], "sync_gate": gate, "live": True})
         pending = (
             TenantPaymentSubmission.objects.filter(
                 clinic_tin=tenant.clinic_tin,
@@ -117,6 +159,7 @@ class BillingMeView(APIView):
             {
                 "billing": billing_snapshot(tenant),
                 "access_mode": access.access_mode,
+                "sync_gate": gate,
                 "payment_kind": access.payment_kind,
                 "period_status": access.period_status,
                 "channels": list(PAYMENT_CHANNELS),

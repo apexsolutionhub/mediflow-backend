@@ -16,4 +16,12 @@ class TenantBillingAccessPermission(BasePermission):
         if not tenant:
             return False
         decision = resolve_login_access(tenant, role=profile.role)
-        return decision.access_mode == "full"
+        if decision.access_mode != "full":
+            return False
+        # An offline clinic server that is overdue for a sync is closed to everyone but Sync and Billing.
+        from clinic.sync_gate import STAFF_MESSAGE, gate_for_profile
+
+        if gate_for_profile(profile, tenant).get("overdue"):
+            self.message = STAFF_MESSAGE
+            return False
+        return True

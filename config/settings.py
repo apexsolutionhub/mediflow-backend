@@ -2,6 +2,7 @@
 Django settings for BackEnd project.
 """
 
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -41,6 +42,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "clinic.node_middleware.ClinicNodeGuardMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -80,8 +82,30 @@ DATABASES = {
         "HOST": config("DB_HOST", default="127.0.0.1"),
         "PORT": config("DB_PORT", default="3306"),
         "OPTIONS": db_options,
+        # Lets two test runs use different throwaway databases (set TEST_DB_NAME for the second one).
+        "TEST": {"NAME": config("TEST_DB_NAME", default="") or None},
     }
 }
+
+# Tests drive a clinic node and the cloud in one process: a second, throwaway database plays the node.
+if "test" in sys.argv:
+    # No migrations here: an old tenants migration is MySQL-only SQL. Tables come from the models.
+    DATABASES["node"] = {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": ":memory:",
+        "TEST": {"MIGRATE": False},
+    }
+
+# Offline sync (docs/OFFLINE_SYNC_CONTRACT.md). "cloud" is the SaaS deployment; "clinic" is a
+# reception-PC node, which syncs to CLOUD_API_URL with its NODE_TOKEN.
+NODE_MODE = config("NODE_MODE", default="cloud")
+CLOUD_API_URL = config("CLOUD_API_URL", default="")
+NODE_TOKEN = config("NODE_TOKEN", default="")
+# Which clinic branch this server is. Must match the scope the node token was issued for.
+NODE_CLINIC_TIN = config("NODE_CLINIC_TIN", default="")
+NODE_BRANCH = config("NODE_BRANCH", default="Main")
+# The static web app a clinic server serves (made by `npm run build:node`).
+FRONTEND_DIR = config("FRONTEND_DIR", default=str(BASE_DIR.parent / "dist-node"))
 
 AUTH_PASSWORD_VALIDATORS = [
     {

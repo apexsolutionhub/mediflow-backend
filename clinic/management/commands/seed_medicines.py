@@ -16,6 +16,7 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from clinic import ledger
 from clinic.models import Medicine, Supplier
 
 SUPPLIERS = [
@@ -112,7 +113,7 @@ class Command(BaseCommand):
             cost_d, price_d = Decimal(cost), Decimal(price)
             size, loose_unit, loose_price = (loose[0], loose[1], Decimal(loose[2]) if loose[2] else None) if loose else (1, "", None)
             total = cost_d * qty
-            Medicine.objects.create(
+            medicine = Medicine.objects.create(
                 clinic_tin=tin,
                 branch_name=branch,
                 supplier=suppliers[sidx],
@@ -133,6 +134,7 @@ class Command(BaseCommand):
                 loose_stock=0,
                 paid_amount=(total * Decimal(str(paid_frac))).quantize(Decimal("0.01")),
             )
+            ledger.record_movement(medicine, "opening", "seed")
             created += 1
         self.stdout.write(
             self.style.SUCCESS(f"{tin} / {branch}: {created} medicines added, {len(suppliers)} suppliers ready.")

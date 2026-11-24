@@ -414,13 +414,26 @@ class MedicineSerializer(serializers.ModelSerializer):
         validated_data["received_quantity"] = quantity
         if validated_data.get("paid_amount") is None:
             validated_data["paid_amount"] = Decimal(quantity) * Decimal(cost)
-        return super().create(validated_data)
+        from . import ledger
+
+        instance = super().create(validated_data)
+        ledger.record_movement(instance, "receive", "intake", self._actor())
+        return instance
 
     def update(self, instance, validated_data):
         if "on_hand" in validated_data:
             delta = validated_data["on_hand"] - instance.on_hand
             validated_data["received_quantity"] = max(0, instance.received_quantity + delta)
-        return super().update(instance, validated_data)
+        from . import ledger
+
+        instance = super().update(instance, validated_data)
+        # A manager edit of the stock: more is "received", less is an "adjustment".
+        ledger.record_movement(instance, None, "manager-edit", self._actor())
+        return instance
+
+    def _actor(self):
+        request = self.context.get("request")
+        return getattr(request, "user", None)
 
     # ---------- computed ----------
     def _total(self, obj):

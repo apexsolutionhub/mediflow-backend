@@ -5,7 +5,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from tenants.billing import PAYMENT_CHANNELS, billing_snapshot, catalog_default_fees, create_payment_submission, resolve_login_access
 from tenants.models import TenantAccount
-from tenants.services import ensure_tenant_account, resolve_tenant_account
+from tenants.services import ensure_tenant_account, generate_clinic_tin, resolve_tenant_account
 
 from .models import UserProfile
 
@@ -75,9 +75,8 @@ class UserSerializer(serializers.ModelSerializer):
         is_self_signup = not (request and getattr(request.user, "is_authenticated", False))
         if is_self_signup:
             tin = (attrs.get("clinic_tin") or "").strip()
-            if not tin:
-                raise serializers.ValidationError({"clinic_tin": ["Clinic TIN is required."]})
-            if TenantAccount.objects.filter(clinic_tin=tin).exists():
+            # A blank TIN is allowed: create() generates a unique one.
+            if tin and TenantAccount.objects.filter(clinic_tin=tin).exists():
                 raise serializers.ValidationError({"clinic_tin": ["A clinic with this TIN is already registered."]})
             branch = (attrs.get("branch_name") or "").strip()
             if not branch:
@@ -116,7 +115,7 @@ class UserSerializer(serializers.ModelSerializer):
 
         if is_self_signup:
             role = "manager"
-            clinic_tin = (validated_data.pop("clinic_tin", "") or "").strip()
+            clinic_tin = (validated_data.pop("clinic_tin", "") or "").strip() or generate_clinic_tin()
         else:
             actor = request.user.profile
             if (actor.role or "").lower() != "manager":
@@ -241,9 +240,15 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         if tenant is None:
             raise AuthenticationFailed("Clinic tenant was not found.")
         decision = resolve_login_access(tenant, role=role)
+        # An offline clinic that has not synced in time: staff wait for the manager, who gets Sync + Billing only.
+        from clinic.sync_gate import apply_gate, gate_for_profile
+
+        gate = gate_for_profile(profile, tenant)
+        decision = apply_gate(decision, gate, role)
         if decision.access_mode == "denied":
             raise AuthenticationFailed(decision.detail or "Access denied.")
         data["user"] = UserSerializer(self.user).data
+        data["sync_gate"] = gate
         data["access_mode"] = decision.access_mode
         data["payment_kind"] = decision.payment_kind
         data["period_status"] = decision.period_status

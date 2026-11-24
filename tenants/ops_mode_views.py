@@ -25,30 +25,33 @@ def serialize_ops_mode_request(req: TenantOpsModeChangeRequest) -> dict:
         "applied_at": req.applied_at,
         "created_at": req.created_at,
         "updated_at": req.updated_at,
-        "applies_immediately": is_immediate_transition(
-            req.current_ops_mode, req.requested_ops_mode
-        ),
+        "applies_immediately": False,
+        "awaiting_step": awaiting_step(req) if req.status == TenantOpsModeChangeRequest.STATUS_APPROVED else None,
     }
 
 
 def is_immediate_transition(current: str, requested: str) -> bool:
-    """Online → offline applies on Apex approval without a sync step."""
-    current = (current or TenantAccount.OPS_MODE_ONLINE).strip().lower()
-    requested = (requested or "").strip().lower()
-    return (
-        current == TenantAccount.OPS_MODE_ONLINE
-        and requested == TenantAccount.OPS_MODE_OFFLINE
-    )
+    """No mode change is immediate any more: both directions wait for a successful sync step.
+
+    online -> offline waits for the initial seed pull; offline -> online waits for the final
+    push + pull (docs/OFFLINE_SYNC_CONTRACT.md, section 3).
+    """
+    return False
+
+
+def awaiting_step(req: TenantOpsModeChangeRequest) -> str:
+    """Which successful step an approved change is waiting for: "seed" or "sync"."""
+    target = (req.requested_ops_mode or "").strip().lower()
+    return "seed" if target == TenantAccount.OPS_MODE_OFFLINE else "sync"
 
 
 def active_ops_mode_block(tenant: TenantAccount):
-    """Approved offline → online change not yet applied after sync."""
+    """An approved change (either direction) that has not been applied yet."""
     return (
         TenantOpsModeChangeRequest.objects.filter(
             clinic_tin=tenant.clinic_tin,
             status=TenantOpsModeChangeRequest.STATUS_APPROVED,
             applied_at__isnull=True,
-            requested_ops_mode=TenantAccount.OPS_MODE_ONLINE,
         )
         .order_by("-reviewed_at")
         .first()
@@ -58,6 +61,22 @@ def active_ops_mode_block(tenant: TenantAccount):
 def apply_ops_mode_to_tenant(tenant: TenantAccount, ops_mode: str) -> None:
     tenant.ops_mode = ops_mode
     tenant.save(update_fields=["ops_mode", "updated_at"])
+
+
+def complete_ops_mode_switch(tenant: TenantAccount) -> TenantOpsModeChangeRequest | None:
+    """Apply the approved change once its seed (to offline) or final sync (to online) succeeded.
+
+    The sync endpoints call this when a seed / sync run completes. Returns the applied request,
+    or None when nothing was waiting.
+    """
+    req = active_ops_mode_block(tenant)
+    if not req:
+        return None
+    apply_ops_mode_to_tenant(tenant, req.requested_ops_mode)
+    req.status = TenantOpsModeChangeRequest.STATUS_APPLIED
+    req.applied_at = timezone.now()
+    req.save(update_fields=["status", "applied_at", "updated_at"])
+    return req
 
 
 class OpsModeStatusView(APIView):
@@ -149,7 +168,7 @@ class RequestOpsModeChangeView(APIView):
         if active_ops_mode_block(tenant):
             return Response(
                 {
-                    "detail": "An approved return-to-cloud is waiting for sync. Complete sync before requesting again.",
+                    "detail": "An approved mode change is waiting for its seed or sync. Complete it before requesting again.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )

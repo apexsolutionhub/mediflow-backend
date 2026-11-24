@@ -388,7 +388,19 @@ def effective_tenant_fees(tenant: TenantAccount) -> tuple[int, int]:
     """Catalog fees unless Apex manually locked this tenant's pricing."""
     if getattr(tenant, "fees_manually_set", False):
         return int(tenant.setup_fee_etb or 0), int(tenant.quarterly_fee_etb or 0)
-    fees = resolve_pricing_for_tenant(tenant)
+    from django.db.utils import DatabaseError
+
+    from .pricing import resolve_pricing_for_tenant
+
+    try:
+        fees = resolve_pricing_for_tenant(tenant)
+    except DatabaseError:
+        # The pricing catalog table belongs to the Apex admin and only exists on the cloud database.
+        # A clinic server uses the fees the cloud sent with the tenant record.
+        return (
+            int(tenant.setup_fee_etb or DEFAULT_SETUP_FEE_ETB),
+            int(tenant.quarterly_fee_etb or DEFAULT_QUARTERLY_FEE_ETB),
+        )
     return (
         int(fees.get("setup_fee_etb") or DEFAULT_SETUP_FEE_ETB),
         int(fees.get("quarterly_fee_etb") or DEFAULT_QUARTERLY_FEE_ETB),

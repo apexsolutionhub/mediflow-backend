@@ -1,10 +1,29 @@
+import uuid
 from decimal import Decimal
 
 from django.conf import settings
 from django.db import models
+from django.db.models.functions import Now
 
 
-class Department(models.Model):
+class SyncMixin(models.Model):
+    """Identity and change-tracking columns every synced row carries (see docs/OFFLINE_SYNC_CONTRACT.md).
+
+    `sync_uuid` is stable across the cloud and a clinic node, so a retried push never duplicates a row.
+    It is nullable on purpose: a row written by an older backend that does not know the column gets
+    its uuid filled in later. `deleted_at` is a soft-delete marker so a delete made offline is not
+    undone by the next pull.
+    """
+
+    sync_uuid = models.UUIDField(default=uuid.uuid4, null=True, unique=True, editable=False)
+    updated_at = models.DateTimeField(auto_now=True, db_default=Now())
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        abstract = True
+
+
+class Department(SyncMixin):
     clinic_tin = models.CharField(max_length=50, db_index=True)
     name = models.CharField(max_length=120)
     branch_name = models.CharField(max_length=120, blank=True, default="")
@@ -18,7 +37,7 @@ class Department(models.Model):
         return self.name
 
 
-class ClinicBranch(models.Model):
+class ClinicBranch(SyncMixin):
     # clinic_tin = organization TIN (groups siblings for referrals / Apex).
     clinic_tin = models.CharField(max_length=50, db_index=True)
     # branch_tin = this location's operational TIN (may differ from org TIN).
@@ -40,7 +59,7 @@ class ClinicBranch(models.Model):
         return (self.branch_tin or self.clinic_tin or "").strip()
 
 
-class Patient(models.Model):
+class Patient(SyncMixin):
     GENDER_CHOICES = (("Male", "Male"), ("Female", "Female"), ("Other", "Other"))
 
     clinic_tin = models.CharField(max_length=50, db_index=True)
@@ -59,7 +78,7 @@ class Patient(models.Model):
         ordering = ["-created_at"]
 
 
-class Encounter(models.Model):
+class Encounter(SyncMixin):
     STATUS_OPEN = "open"
     STATUS_ACTIVE = "active"
     STATUS_CLOSED = "closed"
@@ -83,7 +102,7 @@ class Encounter(models.Model):
         ordering = ["-opened_at"]
 
 
-class BillableService(models.Model):
+class BillableService(SyncMixin):
     SERVICE_TYPES = (
         ("consultation", "Consultation"),
         ("lab", "Lab"),
@@ -112,7 +131,7 @@ class BillableService(models.Model):
         unique_together = ("clinic_tin", "code", "branch_name")
 
 
-class BillableItem(models.Model):
+class BillableItem(SyncMixin):
     PAYMENT = (
         ("AwaitingPayment", "AwaitingPayment"),
         ("PartialPayment", "PartialPayment"),
@@ -132,7 +151,7 @@ class BillableItem(models.Model):
         return self.unit_price * self.quantity
 
 
-class PaymentTransaction(models.Model):
+class PaymentTransaction(SyncMixin):
     encounter = models.ForeignKey(Encounter, on_delete=models.CASCADE, related_name="payments")
     receipt_number = models.CharField(max_length=40)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
@@ -142,7 +161,7 @@ class PaymentTransaction(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
-class RefundTransaction(models.Model):
+class RefundTransaction(SyncMixin):
     encounter = models.ForeignKey(Encounter, on_delete=models.CASCADE, related_name="refunds")
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     reason = models.CharField(max_length=255)
@@ -151,7 +170,7 @@ class RefundTransaction(models.Model):
     status = models.CharField(max_length=20, default="OpenRefund")
 
 
-class ClinicalOrder(models.Model):
+class ClinicalOrder(SyncMixin):
     ORDER_TYPES = (("lab", "lab"), ("radiology", "radiology"), ("prescription", "prescription"))
     STATUSES = (
         ("Draft", "Draft"),
@@ -189,7 +208,7 @@ class ClinicalOrder(models.Model):
     billable = models.ForeignKey(BillableItem, on_delete=models.SET_NULL, null=True, blank=True)
 
 
-class DoctorChart(models.Model):
+class DoctorChart(SyncMixin):
     encounter = models.OneToOneField(Encounter, on_delete=models.CASCADE, related_name="chart")
     chief_complaint = models.TextField(blank=True)
     examination = models.TextField(blank=True)
@@ -199,7 +218,7 @@ class DoctorChart(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
 
-class NurseNote(models.Model):
+class NurseNote(SyncMixin):
     encounter = models.ForeignKey(Encounter, on_delete=models.CASCADE, related_name="nurse_notes")
     note_type = models.CharField(max_length=40, default="progress")
     content = models.TextField()
@@ -208,7 +227,7 @@ class NurseNote(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
-class Appointment(models.Model):
+class Appointment(SyncMixin):
     clinic_tin = models.CharField(max_length=50, db_index=True)
     branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="appointments")
@@ -218,7 +237,7 @@ class Appointment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
-class Supplier(models.Model):
+class Supplier(SyncMixin):
     """Who a medicine stock line was bought from (per clinic branch)."""
 
     clinic_tin = models.CharField(max_length=50, db_index=True)
@@ -242,7 +261,7 @@ class Supplier(models.Model):
         return self.supplier_name
 
 
-class Medicine(models.Model):
+class Medicine(SyncMixin):
     """One medicine stock line: a batch of one product bought from one supplier."""
 
     UNITS = (
@@ -319,7 +338,7 @@ class Medicine(models.Model):
         super().save(*args, **kwargs)
 
 
-class MedicineDamage(models.Model):
+class MedicineDamage(SyncMixin):
     """Stock written off as damaged (broken, expired, spoiled...). Recording one deducts the stock."""
 
     SALE_UNITS = (("pack", "Pack"), ("loose", "Loose unit"))
@@ -340,7 +359,7 @@ class MedicineDamage(models.Model):
         ordering = ["-created_at"]
 
 
-class EquipmentTicket(models.Model):
+class EquipmentTicket(SyncMixin):
     clinic_tin = models.CharField(max_length=50, db_index=True)
     branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
     title = models.CharField(max_length=255)
@@ -351,7 +370,7 @@ class EquipmentTicket(models.Model):
     resolution = models.TextField(blank=True)
 
 
-class Referral(models.Model):
+class Referral(SyncMixin):
     KIND_INTERNAL = "internal"
     KIND_EXTERNAL = "external"
     KIND_CHOICES = (
@@ -420,7 +439,7 @@ class OrgManagerMessage(models.Model):
         ordering = ["created_at"]
 
 
-class LabTestParameter(models.Model):
+class LabTestParameter(SyncMixin):
     """One measurable field of a lab test (e.g. Hemoglobin, Malaria RDT).
 
     Attached to a lab BillableService so the doctor orders by catalog entry
@@ -504,7 +523,7 @@ class LabTestParameter(models.Model):
         return value[:255], "normal"
 
 
-class OrderResultValue(models.Model):
+class OrderResultValue(SyncMixin):
     """Recorded value for one parameter of a lab order (snapshot of the definition)."""
 
     FLAGS = (
@@ -534,7 +553,7 @@ class OrderResultValue(models.Model):
         ordering = ["sort_order", "id"]
 
 
-class RadiologyReport(models.Model):
+class RadiologyReport(SyncMixin):
     """Structured imaging report for a radiology order."""
 
     TAGS = (("normal", "Normal"), ("abnormal", "Abnormal"), ("critical", "Critical"))
@@ -552,3 +571,135 @@ class RadiologyReport(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
     updated_at = models.DateTimeField(auto_now=True)
+
+
+class StockMovement(models.Model):
+    """Append-only record of every change to a medicine's stock.
+
+    `delta` is counted in the smallest unit the medicine is sold in: loose units when the pack
+    splits (pack_size > 1), whole packs otherwise. Summing a medicine's deltas always equals its
+    stock on hand, so a sync merges movements instead of copying a stock number.
+    """
+
+    KIND_OPENING = "opening"
+    KIND_RECEIVE = "receive"
+    KIND_DISPENSE = "dispense"
+    KIND_DAMAGE = "damage"
+    KIND_ADJUST = "adjust"
+    KINDS = (
+        (KIND_OPENING, "Opening balance"),
+        (KIND_RECEIVE, "Received"),
+        (KIND_DISPENSE, "Dispensed"),
+        (KIND_DAMAGE, "Damaged"),
+        (KIND_ADJUST, "Adjustment"),
+    )
+
+    sync_uuid = models.UUIDField(default=uuid.uuid4, null=True, unique=True, editable=False)
+    clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    medicine = models.ForeignKey(Medicine, on_delete=models.CASCADE, related_name="movements")
+    kind = models.CharField(max_length=16, choices=KINDS, default=KIND_ADJUST)
+    delta = models.IntegerField()
+    pack_size = models.PositiveIntegerField(default=1)
+    reference = models.CharField(max_length=64, blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [models.Index(fields=["medicine", "created_at"])]
+
+
+class SyncState(models.Model):
+    """Where a clinic node (one `(clinic_tin, branch_name)` scope) stands with the cloud."""
+
+    clinic_tin = models.CharField(max_length=50)
+    branch_name = models.CharField(max_length=120, blank=True, default="")
+    seeded_at = models.DateTimeField(null=True, blank=True)
+    last_successful_sync_at = models.DateTimeField(null=True, blank=True)
+    last_sync_token = models.CharField(max_length=128, blank=True, default="")
+    # Set when the node was restored from a backup or rebuilt: the first thing to do is sync.
+    restore_pending = models.BooleanField(default=False, db_default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["clinic_tin", "branch_name"], name="uniq_sync_state_scope")
+        ]
+
+
+class SyncRun(models.Model):
+    """One sync attempt: push, then pull. `sync_uuid` doubles as the push id for idempotency."""
+
+    KIND_SYNC = "sync"
+    KIND_SEED = "seed"
+    KINDS = ((KIND_SYNC, "Sync"), (KIND_SEED, "Initial seed"))
+    STEP_IDLE = "idle"
+    STEP_RUNNING = "running"
+    STEP_OK = "ok"
+    STEP_FAILED = "failed"
+    STEP_SKIPPED = "skipped"
+    STEPS = (
+        (STEP_IDLE, "Idle"),
+        (STEP_RUNNING, "Running"),
+        (STEP_OK, "OK"),
+        (STEP_FAILED, "Failed"),
+        (STEP_SKIPPED, "Skipped"),
+    )
+
+    sync_uuid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="")
+    kind = models.CharField(max_length=8, choices=KINDS, default=KIND_SYNC)
+    push_status = models.CharField(max_length=10, choices=STEPS, default=STEP_IDLE)
+    pull_status = models.CharField(max_length=10, choices=STEPS, default=STEP_IDLE)
+    error_message = models.TextField(blank=True, default="")
+    receipt = models.JSONField(default=dict, blank=True)
+    started_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    started_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+
+
+class SyncNode(models.Model):
+    """A clinic node's credential. One per `(clinic_tin, branch_name)` scope; only the token hash is kept."""
+
+    clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="")
+    label = models.CharField(max_length=120, blank=True, default="")
+    token_hash = models.CharField(max_length=64, unique=True)
+    token_prefix = models.CharField(max_length=12, blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.clinic_tin} / {self.branch_name or 'Main'} ({self.token_prefix}...)"
+
+
+class SyncConflict(models.Model):
+    """A row the merge refused to overwrite silently. Kept for the manager to review."""
+
+    SIDE_CLOUD = "cloud"
+    SIDE_NODE = "node"
+
+    clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="")
+    entity = models.CharField(max_length=40)
+    row_uuid = models.CharField(max_length=40, blank=True, default="")
+    label = models.CharField(max_length=255, blank=True, default="")
+    side = models.CharField(max_length=8, default=SIDE_CLOUD)
+    incoming = models.JSONField(default=dict, blank=True)
+    existing = models.JSONField(default=dict, blank=True)
+    note = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
