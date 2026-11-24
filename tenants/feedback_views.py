@@ -87,7 +87,7 @@ def post_message(tin: str, username: str, body: str, image_url: str) -> tuple[in
     return 201, serialize_message(message)
 
 
-def _via_cloud(path: str, payload: dict):
+def _via_cloud(path: str, payload: dict, success_status: int = 200):
     """On a clinic server the chat lives in the cloud only: forward it, and never store or queue it here.
 
     Returns None when this is not a clinic server. Otherwise a Response: the cloud's answer, or a 503 with
@@ -99,7 +99,7 @@ def _via_cloud(path: str, payload: dict):
     if not sync_billing.proxy_enabled():
         return None
     try:
-        return Response(sync_billing.cloud_call(path, payload))
+        return Response(sync_billing.cloud_call(path, payload), status=success_status)
     except TransportError as exc:
         if exc.status and exc.status < 500:
             return Response({"detail": str(exc)}, status=exc.status)
@@ -147,7 +147,7 @@ class ClinicFeedbackSendView(APIView):
             "image_url": request.data.get("image_url") or "",
             "username": request.user.username,
         }
-        proxied = _via_cloud("feedback/send", payload)
+        proxied = _via_cloud("feedback/send", payload, success_status=201)  # the same answer the cloud itself gives
         if proxied is not None:
             return proxied
         code, data = post_message(tin, request.user.username, payload["body"], payload["image_url"])

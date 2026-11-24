@@ -56,7 +56,7 @@ class SoftDeleteApiTests(TestCase):
         svc = BillableService.objects.create(
             clinic_tin=TIN, branch_name=BRANCH, code="CONS", name="Consultation", department="OPD", unit_price=100
         )
-        self.assertEqual(self.client.delete(f"/api/clinic/billable-services/{svc.id}/").status_code, 204)
+        self.assertEqual(self.client.delete(f"/api/clinic/services/{svc.id}/").status_code, 204)
         self.assertEqual(BillableService.all_objects.get(pk=svc.pk).deleted_at is not None, True)
         BillableService.objects.create(
             clinic_tin=TIN, branch_name=BRANCH, code="CONS", name="Consultation 2", department="OPD", unit_price=120

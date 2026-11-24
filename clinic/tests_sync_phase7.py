@@ -85,6 +85,31 @@ class ReminderTests(TestCase):
 
 
 class ChatTests(TestCase):
+    # The chat tables belong to the Apex admin (managed elsewhere), so a fresh test database has none.
+    _made = []
+
+    @classmethod
+    def setUpClass(cls):
+        from django.db import connection
+
+        existing = set(connection.introspection.table_names())
+        cls._made = []
+        with connection.schema_editor() as editor:
+            for model in (TenantFeedbackThread, TenantFeedbackMessage):
+                if model._meta.db_table not in existing:
+                    editor.create_model(model)
+                    cls._made.append(model)
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        from django.db import connection
+
+        super().tearDownClass()
+        with connection.schema_editor() as editor:
+            for model in reversed(cls._made):
+                editor.delete_model(model)
+
     def setUp(self):
         self.user = get_user_model().objects.create_user("chatter", password="x")
         UserProfile.objects.create(user=self.user, clinic_tin=TIN, role="manager", branch_name=BRANCH)

@@ -379,8 +379,9 @@ class BillableServiceViewSet(TenantScopedMixin, viewsets.ModelViewSet):
                 )
             clean.append(LabTestParameter(service=service, **{**data, "sort_order": index}))
         with transaction.atomic():
-            for old_parameter in service.parameters.all():
+            for old_parameter in LabTestParameter.objects.filter(service=service):
                 old_parameter.soft_delete()
+            getattr(service, "_prefetched_objects_cache", {}).pop("parameters", None)
             LabTestParameter.objects.bulk_create(clean)
         return Response(LabTestParameterSerializer(service.parameters.all(), many=True).data)
 
@@ -679,8 +680,10 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
             if errors:
                 return Response({"detail": " ".join(errors)}, status=400)
             with transaction.atomic():
-                for old_value in order.result_values.all():
+                for old_value in OrderResultValue.objects.filter(order=order):
                     old_value.soft_delete()
+                # The order came with its result values prefetched; forget that list so the reply shows the new ones.
+                getattr(order, "_prefetched_objects_cache", {}).pop("result_values", None)
                 OrderResultValue.objects.bulk_create(rows)
                 order.result_text = chr(10).join(
                     f"{r.name}: {r.value}{(' ' + r.unit) if r.unit else ''}"
