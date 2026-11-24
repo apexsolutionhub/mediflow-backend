@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .sync_views import (
+    BackupNowView,
     SyncBillingStatusView,
     SyncBillingSubmitView,
     SyncCompleteView,
@@ -20,6 +21,7 @@ urlpatterns = [
     path("billing/submit/", SyncBillingSubmitView.as_view(), name="sync-billing-submit"),
     path("status/", SyncStatusView.as_view(), name="sync-status"),
     path("conflicts/", SyncConflictsView.as_view(), name="sync-conflicts"),
+    path("backup/", BackupNowView.as_view(), name="sync-backup"),
     path("run/", SyncRunView.as_view(), name="sync-run"),
     path("seed/", SyncSeedView.as_view(), name="sync-seed"),
 ]

@@ -122,6 +122,26 @@ def _last_push_since(scope, db, current):
     return last.started_at - PUSH_MARGIN if last else None
 
 
+def _presync_backup(run: SyncRun, db: str):
+    """Back up the clinic database right before a sync, so a bad pull can always be undone.
+
+    A failed backup does not stop the sync (a broken backup tool must not lock the clinic out through
+    the freshness rule); it is recorded on the run and shown to the manager.
+    """
+    from django.conf import settings
+
+    if db != "default" or run.kind != SyncRun.KIND_SYNC or not getattr(settings, "BACKUP_BEFORE_SYNC", False):
+        return
+    from . import backup
+
+    result = backup.make_backup("presync")
+    run.receipt = {
+        **run.receipt,
+        "backup": {"ok": result.ok, "file": result.path.name if result.path else "", "error": result.error},
+    }
+    run.save(using=db)
+
+
 def run_sync(scope: Scope, transport, user=None, kind=SyncRun.KIND_SYNC, run=None, db="default") -> SyncRun:
     """Push, then pull, then tell the cloud it is done. Never raises: the outcome is on the run."""
     state, _ = SyncState.objects.using(db).get_or_create(clinic_tin=scope.tin, branch_name=scope.branch)
@@ -145,6 +165,7 @@ def run_sync(scope: Scope, transport, user=None, kind=SyncRun.KIND_SYNC, run=Non
             else:
                 run.push_status = SyncRun.STEP_RUNNING
                 run.save(using=db)
+                _presync_backup(run, db)
                 since = _last_push_since(scope, db, run)
                 receipt = transport.push(
                     {
@@ -158,7 +179,7 @@ def run_sync(scope: Scope, transport, user=None, kind=SyncRun.KIND_SYNC, run=Non
                 apply_remap(receipt.get("remap") or {}, db)
                 mirror_submission_status(scope.tin, receipt.get("billing_verdicts"), db)
                 run.push_status = SyncRun.STEP_OK
-                run.receipt = {"push": receipt}
+                run.receipt = {**run.receipt, "push": receipt}
                 run.save(using=db)
 
         # 2. Pull the cloud's changes, only after the push succeeded.

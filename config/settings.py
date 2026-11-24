@@ -104,6 +104,16 @@ NODE_TOKEN = config("NODE_TOKEN", default="")
 # Which clinic branch this server is. Must match the scope the node token was issued for.
 NODE_CLINIC_TIN = config("NODE_CLINIC_TIN", default="")
 NODE_BRANCH = config("NODE_BRANCH", default="Main")
+# Local backups on a clinic server (clinic/backup.py). Empty BACKUP_DIR means a `backups` folder next to BackEnd.
+BACKUP_DIR = config("BACKUP_DIR", default="")
+# A second disk or USB drive that every backup is also copied to (recommended).
+BACKUP_COPY_DIR = config("BACKUP_COPY_DIR", default="")
+BACKUP_KEEP_DAYS = config("BACKUP_KEEP_DAYS", default=7, cast=int)
+BACKUP_STALE_HOURS = config("BACKUP_STALE_HOURS", default=36, cast=int)
+# A backup is taken automatically right before each manager-started sync.
+BACKUP_BEFORE_SYNC = config("BACKUP_BEFORE_SYNC", default=True, cast=bool)
+MYSQLDUMP_PATH = config("MYSQLDUMP_PATH", default="")
+MYSQL_PATH = config("MYSQL_PATH", default="")
 # The static web app a clinic server serves (made by `npm run build:node`).
 FRONTEND_DIR = config("FRONTEND_DIR", default=str(BASE_DIR.parent / "dist-node"))
 
