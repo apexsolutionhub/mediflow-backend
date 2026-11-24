@@ -700,6 +700,8 @@ class SyncConflict(models.Model):
     note = models.CharField(max_length=255, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.CharField(max_length=150, blank=True, default="", db_default="")
+    resolution_note = models.CharField(max_length=255, blank=True, default="", db_default="")
 
     class Meta:
         ordering = ["-created_at"]

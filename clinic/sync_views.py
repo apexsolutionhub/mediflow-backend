@@ -4,6 +4,7 @@ Cloud (called by a clinic node with its node token):  POST push/, pull/, complet
 Manager (JWT):  GET status/, GET conflicts/  on either side;  POST run/, seed/  on a clinic node.
 """
 from django.conf import settings
+from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -111,6 +112,33 @@ class SyncStatusView(APIView):
         )
 
 
+def _differences(conflict: SyncConflict) -> list:
+    """The fields that differ, as "this server" against "the cloud"."""
+    if conflict.side == SyncConflict.SIDE_CLOUD:
+        server, cloud = conflict.incoming, conflict.existing  # the cloud kept its own copy
+    else:
+        server, cloud = conflict.existing, conflict.incoming  # this server kept its own copy
+    names = [n for n in dict.fromkeys([*server.keys(), *cloud.keys()]) if str(server.get(n)) != str(cloud.get(n))]
+    return [{"field": n, "server": server.get(n), "cloud": cloud.get(n)} for n in names]
+
+
+def _conflict_json(c: SyncConflict) -> dict:
+    return {
+        "id": c.id,
+        "entity": c.entity,
+        "label": c.label,
+        "side": c.side,
+        # Which copy is live on both sides now: the cloud copy after a push conflict, the server copy after a pull one.
+        "kept": "cloud" if c.side == SyncConflict.SIDE_CLOUD else "server",
+        "note": c.note,
+        "differences": _differences(c),
+        "created_at": c.created_at,
+        "resolved_at": c.resolved_at,
+        "resolved_by": c.resolved_by,
+        "resolution_note": c.resolution_note,
+    }
+
+
 class SyncConflictsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -118,24 +146,31 @@ class SyncConflictsView(APIView):
         scope = _manager_scope(request)
         if scope is None:
             return Response({"detail": "Only clinic managers can see sync."}, status=status.HTTP_403_FORBIDDEN)
-        rows = SyncConflict.objects.filter(
-            clinic_tin=scope.tin, branch_name=scope.branch, resolved_at__isnull=True
-        )[:100]
-        return Response(
-            [
-                {
-                    "id": c.id,
-                    "entity": c.entity,
-                    "label": c.label,
-                    "side": c.side,
-                    "note": c.note,
-                    "incoming": c.incoming,
-                    "existing": c.existing,
-                    "created_at": c.created_at,
-                }
-                for c in rows
-            ]
-        )
+        rows = SyncConflict.objects.filter(clinic_tin=scope.tin, branch_name=scope.branch)
+        if request.query_params.get("include") != "resolved":
+            rows = rows.filter(resolved_at__isnull=True)
+        return Response([_conflict_json(c) for c in rows[:100]])
+
+
+class SyncConflictResolveView(APIView):
+    """The manager has looked at a conflict (and re-entered the other version by hand if it mattered)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        scope = _manager_scope(request)
+        if scope is None:
+            return Response({"detail": "Only clinic managers can review conflicts."}, status=status.HTTP_403_FORBIDDEN)
+        conflict = SyncConflict.objects.filter(pk=pk, clinic_tin=scope.tin, branch_name=scope.branch).first()
+        if conflict is None:
+            return Response({"detail": "Conflict not found."}, status=status.HTTP_404_NOT_FOUND)
+        if conflict.resolved_at is not None:
+            return Response({"detail": "This conflict is already reviewed."}, status=status.HTTP_400_BAD_REQUEST)
+        conflict.resolved_at = timezone.now()
+        conflict.resolved_by = request.user.get_username()[:150]
+        conflict.resolution_note = str(request.data.get("note") or "").strip()[:255]
+        conflict.save(update_fields=["resolved_at", "resolved_by", "resolution_note"])
+        return Response(_conflict_json(conflict))
 
 
 class _NodeRun(APIView):

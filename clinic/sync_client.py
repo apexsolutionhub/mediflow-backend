@@ -20,6 +20,7 @@ from .sync_engine import (
     apply_remap,
     apply_scope,
     apply_staff,
+    store_remote_conflicts,
     apply_tenant,
     export_scope,
 )
@@ -178,6 +179,7 @@ def run_sync(scope: Scope, transport, user=None, kind=SyncRun.KIND_SYNC, run=Non
                 )
                 apply_remap(receipt.get("remap") or {}, db)
                 mirror_submission_status(scope.tin, receipt.get("billing_verdicts"), db)
+                store_remote_conflicts(scope, receipt.get("conflict_items"), db)
                 run.push_status = SyncRun.STEP_OK
                 run.receipt = {**run.receipt, "push": receipt}
                 run.save(using=db)

@@ -23,6 +23,11 @@ from .models import Medicine, SyncConflict
 from .sync_registry import APPEND, BY_KEY, CATALOG, ENTITIES, FORWARD, LWW, scope_q
 
 PUSH, PULL = "push", "pull"
+CONFLICT_NOTES = {
+    PUSH: "Changed on both the clinic server and the cloud since the last sync. The cloud copy was kept.",
+    PULL: "Changed on the clinic server while syncing. The cloud change was not applied and the clinic server copy was kept.",
+}
+MAX_CONFLICT_ITEMS = 50
 OVERLAP = timedelta(seconds=5)  # delta tokens reach slightly back so nothing slips between runs
 
 
@@ -40,6 +45,7 @@ class Scope:
 class ApplyResult:
     counts: dict = field(default_factory=dict)
     conflicts: int = 0
+    conflict_items: list = field(default_factory=list)  # what the node needs to show its manager
     remap: dict = field(default_factory=dict)  # entity key -> {incoming uuid: existing uuid}
 
     def bump(self, key, what):
@@ -47,7 +53,12 @@ class ApplyResult:
         self.counts[key][what] += 1
 
     def as_dict(self):
-        return {"counts": self.counts, "conflicts": self.conflicts, "remap": self.remap}
+        return {
+            "counts": self.counts,
+            "conflicts": self.conflicts,
+            "remap": self.remap,
+            "conflict_items": self.conflict_items[:MAX_CONFLICT_ITEMS],
+        }
 
 
 # ---------- value conversion ----------
@@ -141,18 +152,37 @@ class _Apply:
         return self.queryset(BY_KEY[target_key]).filter(sync_uuid=raw).first()
 
     def conflict(self, ent, row, existing_data, note):
+        """Log a row the merge would not overwrite. The same row conflicting again updates its open entry."""
         self.result.conflicts += 1
-        SyncConflict.objects.using(self.db).create(
+        side = SyncConflict.SIDE_CLOUD if self.mode == PUSH else SyncConflict.SIDE_NODE
+        fields = {
+            "label": _label(ent, row["data"]),
+            "incoming": row["data"],
+            "existing": existing_data,
+            "note": note,
+        }
+        open_entry = SyncConflict.objects.using(self.db).filter(
             clinic_tin=self.scope.tin,
             branch_name=self.scope.branch,
             entity=ent.key,
             row_uuid=row["sync_uuid"],
-            label=_label(ent, row["data"]),
-            side=SyncConflict.SIDE_CLOUD if self.mode == PUSH else SyncConflict.SIDE_NODE,
-            incoming=row["data"],
-            existing=existing_data,
-            note=note,
-        )
+            side=side,
+            resolved_at__isnull=True,
+        ).first()
+        if open_entry is not None:
+            for name, value in fields.items():
+                setattr(open_entry, name, value)
+            open_entry.save(using=self.db)
+        else:
+            SyncConflict.objects.using(self.db).create(
+                clinic_tin=self.scope.tin,
+                branch_name=self.scope.branch,
+                entity=ent.key,
+                row_uuid=row["sync_uuid"],
+                side=side,
+                **fields,
+            )
+        self.result.conflict_items.append({"entity": ent.key, "row_uuid": row["sync_uuid"], "side": side, **fields})
 
 
 def _label(ent, data):
@@ -307,7 +337,7 @@ def _apply_row(ctx, ent, row):
         _save(ctx, ent, existing, row)
         ctx.result.bump(ent.key, "updated")
     elif verdict == "conflict":
-        ctx.conflict(ent, row, _existing_data(ent, existing), "Changed on both sides since the last sync; the cloud copy was kept.")
+        ctx.conflict(ent, row, _existing_data(ent, existing), CONFLICT_NOTES[ctx.mode])
         ctx.result.bump(ent.key, "conflicts")
     else:
         ctx.result.bump(ent.key, "skipped")
@@ -426,3 +456,30 @@ def delta_since(token):
     """Where the next delta starts: a little before the token, so a row saved mid-run is sent again."""
     since = _when(token)
     return since - OVERLAP if since else None
+
+
+def store_remote_conflicts(scope: Scope, items: list, db="default") -> int:
+    """The cloud refused to overwrite these rows: keep a copy where the clinic manager can see it."""
+    stored = 0
+    for item in items or []:
+        entry = SyncConflict.objects.using(db).filter(
+            clinic_tin=scope.tin,
+            branch_name=scope.branch,
+            entity=item["entity"],
+            row_uuid=item["row_uuid"],
+            side=SyncConflict.SIDE_CLOUD,
+            resolved_at__isnull=True,
+        ).first() or SyncConflict(
+            clinic_tin=scope.tin,
+            branch_name=scope.branch,
+            entity=item["entity"],
+            row_uuid=item["row_uuid"],
+            side=SyncConflict.SIDE_CLOUD,
+        )
+        entry.label = item.get("label", "")
+        entry.incoming = item.get("incoming", {})
+        entry.existing = item.get("existing", {})
+        entry.note = item.get("note", "")
+        entry.save(using=db)
+        stored += 1
+    return stored
