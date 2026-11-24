@@ -4,6 +4,14 @@ from decimal import Decimal
 from django.conf import settings
 from django.db import models
 from django.db.models.functions import Now
+from django.utils import timezone
+
+
+class AliveManager(models.Manager):
+    """The default manager: rows that were deleted (soft) are invisible to every ordinary query."""
+
+    def get_queryset(self):
+        return super().get_queryset().filter(deleted_at__isnull=True)
 
 
 class SyncMixin(models.Model):
@@ -19,11 +27,30 @@ class SyncMixin(models.Model):
     updated_at = models.DateTimeField(auto_now=True, db_default=Now())
     deleted_at = models.DateTimeField(null=True, blank=True)
 
+    # `objects` hides deleted rows; `all_objects` (used by the sync engine) sees them as tombstones.
+    objects = AliveManager()
+    all_objects = models.Manager()
+
+    # A column whose value must stay unique (a code or a name). It is renamed on delete so the same
+    # code or name can be used again, while the tombstone keeps its identity for sync.
+    SOFT_DELETE_RENAME = ""
+
     class Meta:
         abstract = True
 
+    def soft_delete(self):
+        """Delete without losing the fact that it was deleted: the other side of a sync must learn of it."""
+        if self.SOFT_DELETE_RENAME:
+            field = self._meta.get_field(self.SOFT_DELETE_RENAME)
+            suffix = f" [deleted {uuid.uuid4().hex[:6]}]"
+            room = (field.max_length or 255) - len(suffix)
+            setattr(self, self.SOFT_DELETE_RENAME, str(getattr(self, self.SOFT_DELETE_RENAME))[:room] + suffix)
+        self.deleted_at = timezone.now()
+        self.save()
+
 
 class Department(SyncMixin):
+    SOFT_DELETE_RENAME = "name"
     clinic_tin = models.CharField(max_length=50, db_index=True)
     name = models.CharField(max_length=120)
     branch_name = models.CharField(max_length=120, blank=True, default="")
@@ -103,6 +130,7 @@ class Encounter(SyncMixin):
 
 
 class BillableService(SyncMixin):
+    SOFT_DELETE_RENAME = "code"
     SERVICE_TYPES = (
         ("consultation", "Consultation"),
         ("lab", "Lab"),
@@ -238,6 +266,7 @@ class Appointment(SyncMixin):
 
 
 class Supplier(SyncMixin):
+    SOFT_DELETE_RENAME = "supplier_name"
     """Who a medicine stock line was bought from (per clinic branch)."""
 
     clinic_tin = models.CharField(max_length=50, db_index=True)

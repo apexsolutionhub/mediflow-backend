@@ -358,3 +358,50 @@ class BackupApiTests(TestCase):
             res = self.as_user(self.manager).post("/api/sync/backup/")
         self.assertEqual(res.status_code, 400)
         make.assert_not_called()
+
+
+class RealToolBehaviourTests(SimpleTestCase):
+    """Things the first real mysqldump / mysql drill showed."""
+
+    DATABASES = {"default": {"NAME": "clinic", "USER": "u", "PASSWORD": "p", "HOST": "127.0.0.1", "PORT": "3306"}}
+
+    def command(self, supports):
+        backup._supports.cache_clear()
+        with override_settings(DATABASES=self.DATABASES):
+            with mock.patch("clinic.backup._supports", return_value=supports):
+                return backup.dump_command()[0]
+
+    def test_the_gtid_line_is_left_out_when_the_tool_supports_it(self):
+        command = self.command(True)
+        self.assertIn("--set-gtid-purged=OFF", command)
+        self.assertEqual(command[-1], "clinic")  # the database name stays last
+
+    def test_a_tool_without_the_option_is_not_given_it(self):
+        self.assertNotIn("--set-gtid-purged=OFF", self.command(False))
+
+    def test_the_option_check_reads_the_tools_help(self):
+        backup._supports.cache_clear()
+        fake = mock.Mock(stdout=b"  --set-gtid-purged[=name]\n", stderr=b"")
+        with mock.patch("subprocess.run", return_value=fake):
+            self.assertTrue(backup._supports("mysqldump-a", "set-gtid-purged"))
+        with mock.patch("subprocess.run", return_value=mock.Mock(stdout=b"--other\n", stderr=b"")):
+            self.assertFalse(backup._supports("mysqldump-b", "set-gtid-purged"))
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            self.assertFalse(backup._supports("mysqldump-c", "set-gtid-purged"))
+
+    def test_restore_skips_the_gtid_line_but_loads_everything_else(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "x.sql.gz"
+        with gzip.open(path, "wb") as handle:
+            handle.write(b"-- MySQL dump\nSET @@GLOBAL.GTID_PURGED=/*!80000 '+'*/ 'abc:1-9';\nCREATE TABLE `a` (`id` int);\n")
+        sent = []
+        process = mock.Mock()
+        process.stdin.write.side_effect = sent.append
+        process.stderr.read.return_value = b""
+        process.wait.return_value = 0
+        with mock.patch("subprocess.Popen", return_value=process):
+            backup._load_dump(path)
+        loaded = b"".join(sent)
+        self.assertNotIn(b"GTID_PURGED", loaded)
+        self.assertIn(b"CREATE TABLE", loaded)

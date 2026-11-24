@@ -116,6 +116,13 @@ class TenantScopedMixin:
             return False
         return True
 
+    def perform_destroy(self, instance):
+        # Deleted rows stay as tombstones so a sync can carry the deletion to the other side.
+        if hasattr(instance, "soft_delete"):
+            instance.soft_delete()
+        else:
+            instance.delete()
+
 
 class PatientViewSet(TenantScopedMixin, viewsets.ModelViewSet):
     serializer_class = PatientSerializer
@@ -346,7 +353,7 @@ class BillableServiceViewSet(TenantScopedMixin, viewsets.ModelViewSet):
                     "detail": "Cannot delete the auto-add registration service. Assign another service first."
                 }
             )
-        instance.delete()
+        instance.soft_delete()
 
     @action(detail=True, methods=["get", "put"])
     def parameters(self, request, pk=None):
@@ -372,7 +379,8 @@ class BillableServiceViewSet(TenantScopedMixin, viewsets.ModelViewSet):
                 )
             clean.append(LabTestParameter(service=service, **{**data, "sort_order": index}))
         with transaction.atomic():
-            service.parameters.all().delete()
+            for old_parameter in service.parameters.all():
+                old_parameter.soft_delete()
             LabTestParameter.objects.bulk_create(clean)
         return Response(LabTestParameterSerializer(service.parameters.all(), many=True).data)
 
@@ -671,7 +679,8 @@ class OrderViewSet(TenantScopedMixin, viewsets.ModelViewSet):
             if errors:
                 return Response({"detail": " ".join(errors)}, status=400)
             with transaction.atomic():
-                order.result_values.all().delete()
+                for old_value in order.result_values.all():
+                    old_value.soft_delete()
                 OrderResultValue.objects.bulk_create(rows)
                 order.result_text = chr(10).join(
                     f"{r.name}: {r.value}{(' ' + r.unit) if r.unit else ''}"
@@ -871,7 +880,7 @@ class SupplierViewSet(ManagerWritesMixin, TenantScopedMixin, viewsets.ModelViewS
             raise ValidationError(
                 {"detail": f"{instance.supplier_name} supplies {count} medicine line(s). Remove or reassign those first."}
             )
-        instance.delete()
+        instance.soft_delete()
 
 
 class MedicineViewSet(ManagerWritesMixin, TenantScopedMixin, viewsets.ModelViewSet):
@@ -896,7 +905,7 @@ class MedicineViewSet(ManagerWritesMixin, TenantScopedMixin, viewsets.ModelViewS
                     "Record the payment (edit Paid amount) before deleting it."
                 }
             )
-        instance.delete()
+        instance.soft_delete()
 
     @action(detail=False, methods=["post"])
     def batch(self, request):
@@ -996,7 +1005,7 @@ class MedicineDamageViewSet(ManagerWritesMixin, TenantScopedMixin, viewsets.Mode
             stock.restock(medicine, instance.quantity, instance.sale_unit)
             medicine.save(update_fields=stock.STOCK_FIELDS)
             ledger.record_movement(medicine, "adjust", f"damage-removed:{instance.pk}", self.request.user)
-            instance.delete()
+            instance.soft_delete()
 
 
 class DepartmentViewSet(TenantScopedMixin, viewsets.ModelViewSet):
@@ -1047,7 +1056,7 @@ class DepartmentViewSet(TenantScopedMixin, viewsets.ModelViewSet):
             raise ValidationError(
                 {"detail": "Remove or reassign billable services using this department first."}
             )
-        instance.delete()
+        instance.soft_delete()
 
 
 class ClinicBranchViewSet(TenantScopedMixin, viewsets.ModelViewSet):

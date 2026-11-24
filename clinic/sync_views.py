@@ -21,6 +21,8 @@ from .sync_cloud import (
 )
 from .sync_billing import handle_billing_status, handle_billing_submit
 from .sync_engine import Scope
+from .sync_feedback import handle_feedback_send, handle_feedback_thread, handle_feedback_unread
+from .sync_gate import sync_reminder
 
 
 def _is_node() -> bool:
@@ -68,6 +70,18 @@ class SyncBillingSubmitView(_NodeCall):
     handler = staticmethod(handle_billing_submit)
 
 
+class SyncFeedbackUnreadView(_NodeCall):
+    handler = staticmethod(handle_feedback_unread)
+
+
+class SyncFeedbackThreadView(_NodeCall):
+    handler = staticmethod(handle_feedback_thread)
+
+
+class SyncFeedbackSendView(_NodeCall):
+    handler = staticmethod(handle_feedback_send)
+
+
 def _run_json(run: SyncRun) -> dict:
     return {
         "id": str(run.sync_uuid),
@@ -103,6 +117,7 @@ class SyncStatusView(APIView):
                 "seeded_at": state.seeded_at if state else None,
                 "last_successful_sync_at": state.last_successful_sync_at if state else None,
                 "awaiting_step": awaiting_step(waiting) if waiting else None,
+                "freshness": sync_reminder(tenant, scope.branch),
                 "backup": backup.backup_status() if _is_node() else None,
                 "open_conflicts": SyncConflict.objects.filter(
                     clinic_tin=scope.tin, branch_name=scope.branch, resolved_at__isnull=True

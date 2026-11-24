@@ -22,6 +22,7 @@ from .sync_engine import (
     apply_staff,
     store_remote_conflicts,
     apply_tenant,
+    export_credentials,
     export_scope,
 )
 
@@ -102,6 +103,9 @@ class LocalTransport:
         handlers = {
             "billing/status": self.cloud.handle_billing_status,
             "billing/submit": self.cloud.handle_billing_submit,
+            "feedback/unread": self.cloud.handle_feedback_unread,
+            "feedback/thread": self.cloud.handle_feedback_thread,
+            "feedback/send": self.cloud.handle_feedback_send,
         }
         return self._call(handlers[path], body)
 
@@ -175,6 +179,7 @@ def run_sync(scope: Scope, transport, user=None, kind=SyncRun.KIND_SYNC, run=Non
                         "since_token": state.last_sync_token or None,
                         "entities": export_scope(scope, since=since, db=db),
                         "billing_submissions": export_local_submissions(scope.tin, db),
+                        "staff_credentials": export_credentials(scope, since, db),
                     }
                 )
                 apply_remap(receipt.get("remap") or {}, db)

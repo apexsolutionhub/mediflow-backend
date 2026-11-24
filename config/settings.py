@@ -112,6 +112,15 @@ BACKUP_KEEP_DAYS = config("BACKUP_KEEP_DAYS", default=7, cast=int)
 BACKUP_STALE_HOURS = config("BACKUP_STALE_HOURS", default=36, cast=int)
 # A backup is taken automatically right before each manager-started sync.
 BACKUP_BEFORE_SYNC = config("BACKUP_BEFORE_SYNC", default=True, cast=bool)
+# Encrypt every backup with this passphrase (keep a copy with the manager: no passphrase, no restore).
+BACKUP_PASSPHRASE = config("BACKUP_PASSPHRASE", default="")
+# Optional off-site copy of encrypted backups to S3-compatible storage (AWS S3, Cloudflare R2, Backblaze B2, MinIO).
+BACKUP_S3_ENDPOINT = config("BACKUP_S3_ENDPOINT", default="")
+BACKUP_S3_BUCKET = config("BACKUP_S3_BUCKET", default="")
+BACKUP_S3_ACCESS_KEY = config("BACKUP_S3_ACCESS_KEY", default="")
+BACKUP_S3_SECRET_KEY = config("BACKUP_S3_SECRET_KEY", default="")
+BACKUP_S3_REGION = config("BACKUP_S3_REGION", default="us-east-1")
+BACKUP_S3_PREFIX = config("BACKUP_S3_PREFIX", default="mediflow")
 MYSQLDUMP_PATH = config("MYSQLDUMP_PATH", default="")
 MYSQL_PATH = config("MYSQL_PATH", default="")
 # The static web app a clinic server serves (made by `npm run build:node`).

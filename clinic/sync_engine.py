@@ -61,6 +61,11 @@ class ApplyResult:
         }
 
 
+def _rows(model):
+    """Every row of a model including deleted ones (tombstones): the engine must see them to sync a deletion."""
+    return getattr(model, "all_objects", model.objects)
+
+
 # ---------- value conversion ----------
 def _json(value):
     if isinstance(value, (datetime, date)):
@@ -85,12 +90,12 @@ def _when(value):
 # ---------- export ----------
 def ensure_uuids(entity, scope: Scope, db="default"):
     """Rows written by an older backend have no sync_uuid yet; give them one before they travel."""
-    qs = entity.model.objects.using(db).filter(scope_q(entity, scope.tin, scope.branch), sync_uuid__isnull=True)
+    qs = _rows(entity.model).using(db).filter(scope_q(entity, scope.tin, scope.branch), sync_uuid__isnull=True)
     rows = list(qs)
     for row in rows:
         row.sync_uuid = uuid.uuid4()
     if rows:
-        entity.model.objects.using(db).bulk_update(rows, ["sync_uuid"])
+        _rows(entity.model).using(db).bulk_update(rows, ["sync_uuid"])
 
 
 def export_scope(scope: Scope, since=None, db="default") -> dict:
@@ -98,7 +103,7 @@ def export_scope(scope: Scope, since=None, db="default") -> dict:
     out = {}
     for ent in ENTITIES:
         ensure_uuids(ent, scope, db)
-        qs = ent.model.objects.using(db).filter(scope_q(ent, scope.tin, scope.branch))
+        qs = _rows(ent.model).using(db).filter(scope_q(ent, scope.tin, scope.branch))
         if since is not None:
             qs = qs.filter(**{f"{ent.stamp}__gt": since})
         related = [f for f, _, _ in ent.refs] + list(ent.users)
@@ -136,7 +141,7 @@ class _Apply:
         self.users = {}
 
     def queryset(self, ent):
-        return ent.model.objects.using(self.db).filter(scope_q(ent, self.scope.tin, self.scope.branch))
+        return _rows(ent.model).using(self.db).filter(scope_q(ent, self.scope.tin, self.scope.branch))
 
     def user(self, username):
         if not username:
@@ -281,7 +286,10 @@ def _find_natural(ctx, ent, row):
             if related is None:
                 return None
             lookup[name] = related
-    return ctx.queryset(ent).filter(**lookup).first()
+    candidates = ctx.queryset(ent)
+    if hasattr(ent.model, "deleted_at"):
+        candidates = candidates.filter(deleted_at__isnull=True)
+    return candidates.filter(**lookup).first()
 
 
 def _save(ctx, ent, obj, row):
@@ -294,12 +302,12 @@ def _save(ctx, ent, obj, row):
     if ctx.mode == PULL and row.get("stamp") and hasattr(obj, "updated_at") and ent.stamp == "updated_at":
         fixes["updated_at"] = _when(row["stamp"])
     if fixes:
-        ent.model.objects.using(ctx.db).filter(pk=obj.pk).update(**fixes)
+        _rows(ent.model).using(ctx.db).filter(pk=obj.pk).update(**fixes)
 
 
 def _apply_movement(ctx, obj):
     """A new stock movement changes the stock by its delta (never by copying a stock number)."""
-    medicine = Medicine.objects.using(ctx.db).select_for_update().get(pk=obj.medicine_id)
+    medicine = Medicine.all_objects.using(ctx.db).select_for_update().get(pk=obj.medicine_id)
     ledger.set_stock_units(medicine, ledger.stock_units(medicine) + obj.delta)
     medicine.save(using=ctx.db, update_fields=stock.STOCK_FIELDS)
 
@@ -316,11 +324,24 @@ def _apply_row(ctx, ent, row):
                 ctx.remap[uid] = str(twin.sync_uuid)
                 ctx.result.remap.setdefault(ent.key, {})[uid] = str(twin.sync_uuid)
             else:
-                ent.model.objects.using(ctx.db).filter(pk=twin.pk).update(sync_uuid=uid)
+                _rows(ent.model).using(ctx.db).filter(pk=twin.pk).update(sync_uuid=uid)
                 twin.sync_uuid = uuid.UUID(uid)
             existing = twin
         elif twin is not None:
             existing = twin
+    incoming_deleted = bool(row.get("deleted_at"))
+    if existing is None and incoming_deleted:
+        ctx.result.bump(ent.key, "skipped")  # never had it, so there is nothing to delete
+        return
+    if existing is not None and getattr(existing, "deleted_at", None):
+        ctx.result.bump(ent.key, "skipped")  # a deletion is final here; it reaches the other side on the next push
+        return
+    if existing is not None and incoming_deleted:
+        # The other side deleted it: the deletion wins whatever the merge rule, so the row cannot come back.
+        _assign(ctx, ent, existing, row, creating=False)
+        _save(ctx, ent, existing, row)
+        ctx.result.bump(ent.key, "deleted")
+        return
     if existing is None:
         obj = ent.model(sync_uuid=uid)
         if ent.model is Medicine:
@@ -363,7 +384,7 @@ def apply_remap(remap: dict, db="default"):
     for key, pairs in remap.items():
         model = BY_KEY[key].model
         for old, new in pairs.items():
-            model.objects.using(db).filter(sync_uuid=old).update(sync_uuid=new)
+            _rows(model).using(db).filter(sync_uuid=old).update(sync_uuid=new)
 
 
 # ---------- staff and tenant (pulled only: the cloud always wins) ----------
@@ -389,6 +410,7 @@ def export_staff(scope: Scope, db="default") -> list:
             "last_name": p.user.last_name,
             "email": p.user.email,
             "is_active": p.user.is_active,
+            "password_changed_at": _json(p.password_changed_at),
             "profile": {
                 "clinic_name": p.clinic_name,
                 "role": p.role,
@@ -402,6 +424,7 @@ def export_staff(scope: Scope, db="default") -> list:
 
 
 def apply_staff(scope: Scope, staff: list, db="default") -> int:
+    """Take the cloud's staff list. A password changed here after the cloud's last change is kept, not overwritten."""
     from api.models import UserProfile
 
     User = get_user_model()
@@ -410,15 +433,77 @@ def apply_staff(scope: Scope, staff: list, db="default") -> int:
             user = User.objects.using(db).filter(username=item["username"]).first()
             if user is None:
                 user = User(username=item["username"])
-            for name in ("password", "first_name", "last_name", "email", "is_active"):
+            profile = UserProfile.objects.using(db).filter(user=user).first() if user.pk else None
+            incoming_changed = _when(item.get("password_changed_at"))
+            keep_local_password = (
+                profile is not None
+                and profile.password_changed_at is not None
+                and (incoming_changed is None or profile.password_changed_at > incoming_changed)
+            )
+            for name in ("first_name", "last_name", "email", "is_active"):
                 setattr(user, name, item[name])
+            if not keep_local_password:
+                user.password = item["password"]
             user.save(using=db)
-            profile = UserProfile.objects.using(db).filter(user=user).first() or UserProfile(user=user)
+            profile = profile or UserProfile(user=user)
             for name, value in item["profile"].items():
                 setattr(profile, name, value)
             profile.clinic_tin = scope.tin
+            if not keep_local_password:
+                profile.password_changed_at = incoming_changed
             profile.save(using=db)
     return len(staff)
+
+
+def export_credentials(scope: Scope, since=None, db="default") -> list:
+    """Passwords changed on this server since the last push (hashes only), for the cloud to adopt."""
+    from api.models import UserProfile
+
+    profiles = UserProfile.objects.using(db).filter(
+        clinic_tin=scope.tin, branch_name__iexact=scope.branch, password_changed_at__isnull=False
+    ).select_related("user")
+    if since is not None:
+        profiles = profiles.filter(password_changed_at__gt=since)
+    return [
+        {"username": p.user.username, "password": p.user.password, "password_changed_at": _json(p.password_changed_at)}
+        for p in profiles
+    ]
+
+
+def apply_credentials(scope: Scope, items: list, db="default") -> dict:
+    """Adopt a password changed on a clinic server, if it is newer than the cloud's.
+
+    Only accounts that already exist in this branch are touched, and only a real password hash is accepted:
+    a plain password in the payload is refused.
+    """
+    from django.contrib.auth.hashers import identify_hasher
+
+    from api.models import UserProfile
+
+    applied = skipped = 0
+    for item in items or []:
+        try:
+            identify_hasher(item["password"])
+            changed = _when(item["password_changed_at"])
+            username = item["username"]
+        except (KeyError, ValueError, TypeError):
+            skipped += 1
+            continue
+        profile = (
+            UserProfile.objects.using(db)
+            .filter(user__username=username, clinic_tin=scope.tin, branch_name__iexact=scope.branch)
+            .select_related("user")
+            .first()
+        )
+        if profile is None or changed is None or (profile.password_changed_at and profile.password_changed_at >= changed):
+            skipped += 1
+            continue
+        profile.user.password = item["password"]
+        profile.user.save(using=db, update_fields=["password"])
+        profile.password_changed_at = changed
+        profile.save(using=db, update_fields=["password_changed_at", "updated_at"])
+        applied += 1
+    return {"applied": applied, "skipped": skipped}
 
 
 def export_tenant(tin: str, db="default") -> dict | None:

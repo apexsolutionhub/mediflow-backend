@@ -9,6 +9,8 @@ Past that, staff cannot sign in or call the clinic API. The manager can still op
 Billing to fix it. The gate only exists on a clinic server for a tenant in offline mode; the
 cloud and online tenants are never gated.
 """
+from datetime import timedelta
+
 from django.conf import settings
 from django.utils import timezone
 
@@ -63,6 +65,32 @@ def sync_gate(tenant, branch_name: str, now=None) -> dict:
         if days > max_days:
             gate.update(overdue=True, reason="stale")
     return gate
+
+
+def sync_reminder(tenant, branch_name: str, now=None) -> dict:
+    """What the manager should be told about syncing (contract sections 8.1, 8.4 and 14).
+
+    due  - last night's sync was missed: no successful sync since yesterday at noon (the morning reminder).
+    warn - the clinic is about to be (or already is) closed to staff: a day or less left, or overdue.
+    """
+    gate = sync_gate(tenant, branch_name, now)
+    if not gate["applies"]:
+        return {"applies": False, "due": False, "warn": False, "overdue": False, "days_left": None, "max_days": None, "reason": None}
+    now = now or timezone.now()
+    last = gate["last_successful_sync_at"]
+    yesterday_noon = timezone.localtime(now).replace(hour=12, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    missed = last is None or timezone.localtime(last) < yesterday_noon
+    overdue = gate["overdue"]
+    days_left = None if overdue else max(0, gate["max_days"] - (gate["days_since_sync"] or 0))
+    return {
+        "applies": True,
+        "due": missed or overdue,
+        "warn": overdue or (days_left is not None and days_left <= 1),
+        "overdue": overdue,
+        "days_left": days_left,
+        "max_days": gate["max_days"],
+        "reason": "overdue" if overdue else ("missed_last_night" if missed else None),
+    }
 
 
 def gate_for_profile(profile, tenant=None):

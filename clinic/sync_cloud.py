@@ -15,11 +15,13 @@ from rest_framework.permissions import BasePermission
 
 from .models import SyncNode, SyncRun, SyncState
 from .sync_billing import handle_billing_status, handle_billing_submit, receive_submissions
+from .sync_feedback import handle_feedback_send, handle_feedback_thread, handle_feedback_unread
 from .sync_engine import (
     PUSH,
     Scope,
     SyncError,
     _when,
+    apply_credentials,
     apply_scope,
     delta_since,
     delta_token,
@@ -109,6 +111,7 @@ def handle_push(node: SyncNode, body: dict, db="default") -> tuple[int, dict]:
     run.receipt = {
         **result.as_dict(),
         "billing_verdicts": receive_submissions(scope.tin, body.get("billing_submissions") or []),
+        "staff_credentials": apply_credentials(scope, body.get("staff_credentials") or [], db=db),
     }
     run.save(using=db, update_fields=["push_status", "error_message", "finished_at", "receipt"])
     return 200, run.receipt

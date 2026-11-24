@@ -4,13 +4,16 @@ Sync is not backup: until a day's work reaches the cloud, the clinic server's da
 copy. This module makes a compressed dump, checks it, copies it to a second disk or USB drive when
 one is set, keeps the last week, and records the outcome so the manager can see it.
 
-Settings (all optional; see `settings_for`):
-  BACKUP_DIR        where dumps go (default: a `backups` folder next to the backend)
-  BACKUP_COPY_DIR   a second disk or USB drive to copy each dump to
-  BACKUP_KEEP_DAYS  how many days of dumps to keep (default 7)
+Settings (all optional):
+  BACKUP_DIR          where dumps go (default: a `backups` folder next to the backend)
+  BACKUP_COPY_DIR     a second disk or USB drive to copy each dump to
+  BACKUP_KEEP_DAYS    how many days of dumps to keep (default 7)
   BACKUP_STALE_HOURS  a backup older than this shows as "stale" (default 36)
-  MYSQLDUMP_PATH    the mysqldump program (default: found on PATH)
+  BACKUP_PASSPHRASE   encrypt every backup with this passphrase (kept with the manager: no passphrase, no restore)
+  BACKUP_S3_*         off-site copy of encrypted backups to S3-compatible storage (see clinic/offsite.py)
+  MYSQLDUMP_PATH      the mysqldump program (default: found on PATH)
 """
+import functools
 import gzip
 import json
 import os
@@ -24,8 +27,11 @@ from pathlib import Path
 from django.conf import settings
 from django.utils import timezone
 
+from . import backup_crypto, offsite
+
 PREFIX = "mediflow-"
 SUFFIX = ".sql.gz"
+ENCRYPTED_SUFFIX = ".sql.gz.enc"
 STATUS_FILE = "backup_status.json"
 CHUNK = 1024 * 256
 MAX_HISTORY = 20
@@ -44,6 +50,9 @@ class BackupResult:
     error: str = ""
     secondary_ok: bool | None = None  # None: no second location is set
     secondary_error: str = ""
+    encrypted: bool = False
+    offsite_ok: bool | None = None  # None: off-site storage is not set up
+    offsite_error: str = ""
     removed: list = field(default_factory=list)
 
 
@@ -62,11 +71,25 @@ def keep_days() -> int:
     return max(1, int(getattr(settings, "BACKUP_KEEP_DAYS", 7) or 7))
 
 
+def passphrase() -> str:
+    return str(getattr(settings, "BACKUP_PASSPHRASE", "") or "")
+
+
 def stale_hours() -> int:
     return max(1, int(getattr(settings, "BACKUP_STALE_HOURS", 36) or 36))
 
 
 # ---------- the dump ----------
+@functools.lru_cache(maxsize=8)
+def _supports(program: str, option: str) -> bool:
+    """Whether this mysqldump knows an option (MariaDB's, for one, has no --set-gtid-purged)."""
+    try:
+        result = subprocess.run([program, "--help"], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return option.encode() in result.stdout + result.stderr
+
+
 def dump_command() -> tuple[list, dict]:
     """The mysqldump command and its environment. The password goes in the environment, never on the command line."""
     db = settings.DATABASES["default"]
@@ -81,8 +104,11 @@ def dump_command() -> tuple[list, dict]:
         "--triggers",
         "--no-tablespaces",
         "--default-character-set=utf8mb4",
-        str(db["NAME"]),
     ]
+    # A server that uses GTIDs makes mysqldump write "SET @@GLOBAL.GTID_PURGED", which needs SUPER to load back.
+    if _supports(program, "set-gtid-purged"):
+        command.append("--set-gtid-purged=OFF")
+    command.append(str(db["NAME"]))
     env = {**os.environ, "MYSQL_PWD": str(db.get("PASSWORD") or "")}
     return command, env
 
@@ -105,16 +131,29 @@ def _stream_dump(command, env):
         raise BackupError(f"mysqldump failed ({code}): {stderr[:500] or 'no message'}")
 
 
+def open_dump(path: Path):
+    """A readable stream of the dump's SQL (decrypting and unzipping), whether or not the file is encrypted."""
+    try:
+        if backup_crypto.is_encrypted(path):
+            reader = backup_crypto.DecryptingReader(open(path, "rb"), passphrase())
+            return gzip.GzipFile(fileobj=reader, mode="rb")
+        return gzip.open(path, "rb")
+    except backup_crypto.CryptoError as exc:
+        raise BackupError(str(exc)) from exc
+
+
 def verify_dump(path: Path):
     """A readable gzip that starts and ends like a finished mysqldump."""
     head, tail, total = b"", b"", 0
     try:
-        with gzip.open(path, "rb") as handle:
+        with open_dump(path) as handle:
             while chunk := handle.read(CHUNK):
                 if not head:
                     head = chunk[:4096]
                 tail = (tail + chunk)[-4096:]
                 total += len(chunk)
+    except backup_crypto.CryptoError as exc:
+        raise BackupError(str(exc)) from exc
     except (OSError, EOFError) as exc:
         raise BackupError(f"The backup file is damaged ({exc}).") from exc
     if total == 0 or (b"MySQL dump" not in head and b"CREATE TABLE" not in head + tail):
@@ -123,10 +162,10 @@ def verify_dump(path: Path):
         raise BackupError("The backup file is incomplete (the dump did not finish).")
 
 
-def _name(now: datetime, reason: str) -> str:
+def _name(now: datetime, reason: str, encrypted: bool = False) -> str:
     safe = "".join(c for c in reason if c.isalnum() or c in "-_")[:20] or "manual"
     stamp = now.astimezone(dt_timezone.utc).strftime("%Y%m%d-%H%M%S")  # names are always UTC
-    return f"{PREFIX}{stamp}-{safe}{SUFFIX}"
+    return f"{PREFIX}{stamp}-{safe}{ENCRYPTED_SUFFIX if encrypted else SUFFIX}"
 
 
 def parse_time(path: Path) -> datetime | None:
@@ -142,7 +181,7 @@ def list_backups(folder: Path | None = None) -> list:
     folder = folder or backup_dir()
     if not folder.is_dir():
         return []
-    files = [p for p in folder.glob(f"{PREFIX}*{SUFFIX}") if parse_time(p)]
+    files = [p for p in folder.glob(f"{PREFIX}*") if p.name.endswith((SUFFIX, ENCRYPTED_SUFFIX)) and parse_time(p)]
     return sorted(files, key=lambda p: p.name, reverse=True)
 
 
@@ -168,6 +207,23 @@ def rotate(folder: Path, now: datetime, days: int) -> list:
     return removed
 
 
+def _write_dump(path: Path, chunks, encrypt: bool):
+    """Write the dump to `path`: gzip, and AES-encrypted on top when a passphrase is set."""
+    with open(path, "wb") as raw:
+        if encrypt:
+            writer = backup_crypto.EncryptingWriter(raw, passphrase())
+            try:
+                with gzip.GzipFile(fileobj=writer, mode="wb") as out:
+                    for chunk in chunks:
+                        out.write(chunk)
+            finally:
+                writer.close()
+        else:
+            with gzip.GzipFile(fileobj=raw, mode="wb") as out:
+                for chunk in chunks:
+                    out.write(chunk)
+
+
 def make_backup(reason: str = "manual", now: datetime | None = None) -> BackupResult:
     """Dump, check, copy to the second location, rotate, and record the outcome. Never raises."""
     now = now or timezone.now()
@@ -176,17 +232,17 @@ def make_backup(reason: str = "manual", now: datetime | None = None) -> BackupRe
     temp = None
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        final = folder / _name(now, reason)
+        encrypt = bool(passphrase())
+        final = folder / _name(now, reason, encrypted=encrypt)
         temp = final.with_suffix(final.suffix + ".part")
         command, env = dump_command()
-        with gzip.open(temp, "wb") as out:
-            for chunk in _stream_dump(command, env):
-                out.write(chunk)
+        _write_dump(temp, _stream_dump(command, env), encrypt)
         verify_dump(temp)
+        result.encrypted = encrypt
         temp.replace(final)
         temp = None
         result.ok, result.path, result.size = True, final, final.stat().st_size
-    except (BackupError, OSError) as exc:
+    except (BackupError, backup_crypto.CryptoError, OSError) as exc:
         result.error = str(exc)
     finally:
         if temp is not None:
@@ -203,6 +259,16 @@ def make_backup(reason: str = "manual", now: datetime | None = None) -> BackupRe
             except OSError as exc:
                 result.secondary_ok, result.secondary_error = False, f"Second location unavailable: {exc}"
         result.removed = rotate(folder, now, keep_days())
+        if offsite.configured():
+            if not result.encrypted:
+                result.offsite_ok = False
+                result.offsite_error = "Off-site copy needs encrypted backups. Set BACKUP_PASSPHRASE; nothing was uploaded."
+            else:
+                try:
+                    offsite.upload(result.path, now)
+                    result.offsite_ok = True
+                except offsite.OffsiteError as exc:
+                    result.offsite_ok, result.offsite_error = False, str(exc)
     record(result, now)
     return result
 
@@ -231,12 +297,17 @@ def record(result: BackupResult, now: datetime):
         "error": result.error,
         "secondary_ok": result.secondary_ok,
         "secondary_error": result.secondary_error,
+        "encrypted": result.encrypted,
+        "offsite_ok": result.offsite_ok,
+        "offsite_error": result.offsite_error,
     }
     status["last_attempt"] = entry
     if result.ok:
         status["last_success"] = entry
     if result.secondary_ok:
         status["last_secondary_success"] = entry
+    if result.offsite_ok:
+        status["last_offsite_success"] = entry
     status["history"] = ([entry] + status.get("history", []))[:MAX_HISTORY]
     try:
         backup_dir().mkdir(parents=True, exist_ok=True)
@@ -272,6 +343,13 @@ def backup_status(now: datetime | None = None) -> dict:
         "secondary_ok": (last_ok or {}).get("secondary_ok") if second is not None else None,
         "secondary_error": (last_try or {}).get("secondary_error", "") if second is not None else "",
         "last_secondary_at": (status.get("last_secondary_success") or {}).get("at"),
+        # Tier 2: whether new backups are encrypted, and whether an off-site copy is set up and working.
+        "encryption_on": bool(passphrase()),
+        "last_encrypted": bool((last_ok or {}).get("encrypted")),
+        "offsite_configured": offsite.configured(),
+        "offsite_ok": (last_ok or {}).get("offsite_ok") if offsite.configured() else None,
+        "offsite_error": (last_try or {}).get("offsite_error", "") if offsite.configured() else "",
+        "last_offsite_at": (status.get("last_offsite_success") or {}).get("at"),
         "history": status.get("history", [])[:5],
     }
 
@@ -294,10 +372,13 @@ def _load_dump(path: Path):
         process = subprocess.Popen(command, env=env, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     except FileNotFoundError as exc:
         raise BackupError("The mysql program was not found. Install MySQL's command-line tools or set MYSQL_PATH.") from exc
-    with gzip.open(path, "rb") as handle:
+    with open_dump(path) as handle:
         try:
-            while chunk := handle.read(CHUNK):
-                process.stdin.write(chunk)
+            for line in handle:
+                # Older dumps from a GTID server carry this line; it needs SUPER and is not data.
+                if line.startswith(b"SET @@GLOBAL.GTID_PURGED"):
+                    continue
+                process.stdin.write(line)
         except BrokenPipeError:
             pass
     process.stdin.close()

@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -161,6 +162,8 @@ class UserSerializer(serializers.ModelSerializer):
         else:
             user.set_unusable_password()
         user.save()
+        if password:
+            profile_data["password_changed_at"] = timezone.now()
         UserProfile.objects.create(user=user, **profile_data)
 
         if is_self_signup:
@@ -202,12 +205,17 @@ class UserSerializer(serializers.ModelSerializer):
         instance.username = validated_data.get("username", instance.username)
         if password:
             instance.set_password(password)
+            password_changed = True
+        else:
+            password_changed = False
         is_active = validated_data.pop("is_active", None)
         instance.save()
         profile, _ = UserProfile.objects.get_or_create(user=instance)
         for attr, value in profile_fields.items():
             if value is not None:
                 setattr(profile, attr, value)
+        if password_changed:
+            profile.password_changed_at = timezone.now()
         if is_active is not None:
             profile.is_active = is_active
             instance.is_active = is_active

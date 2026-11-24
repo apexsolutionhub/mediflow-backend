@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
@@ -51,7 +52,35 @@ class UserViewSet(viewsets.ModelViewSet):
             qs = qs.filter(profile__branch_name__iexact=branch)
         return qs
 
+    # Staff accounts are managed on the cloud and copied to a clinic server by sync (cloud wins), so changes made
+    # on the server would be undone by the next sync. Only a password change travels back up.
+    def _on_clinic_server(self) -> bool:
+        from django.conf import settings
+
+        return getattr(settings, "NODE_MODE", "cloud") == "clinic"
+
+    def create(self, request, *args, **kwargs):
+        if self._on_clinic_server():
+            return Response(
+                {"detail": "Staff accounts are created on the cloud. Add them there, then sync this server."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        if self._on_clinic_server() and set(request.data.keys()) - {"password"}:
+            return Response(
+                {"detail": "Roles and access are managed on the cloud. On this server you can only change a password."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().update(request, *args, **kwargs)
+
     def destroy(self, request, *args, **kwargs):
+        if self._on_clinic_server():
+            return Response(
+                {"detail": "Staff accounts are removed on the cloud. Remove them there, then sync this server."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         actor_profile = getattr(request.user, "profile", None)
         if not actor_profile or (actor_profile.role or "").lower() != "manager":
             return Response(
@@ -89,6 +118,10 @@ class UserViewSet(viewsets.ModelViewSet):
             )
         user.set_password(serializer.validated_data["new_password"])
         user.save()
+        profile = getattr(user, "profile", None)
+        if profile is not None:
+            profile.password_changed_at = timezone.now()
+            profile.save(update_fields=["password_changed_at", "updated_at"])
         return Response({"detail": "Password updated successfully."})
 
 
