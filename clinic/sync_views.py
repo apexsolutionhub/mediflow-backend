@@ -96,6 +96,30 @@ def _run_json(run: SyncRun) -> dict:
     }
 
 
+STALE_RUN_MINUTES = 10  # three cloud calls of at most 2 minutes each, with room to spare
+
+
+def expire_stale_runs(scope):
+    """A run still "running" long after it began lost its worker (the server restarted, the PC slept).
+
+    Mark it failed so the page stops waiting on it and the manager can run again.
+    """
+    from datetime import timedelta
+
+    cutoff = timezone.now() - timedelta(minutes=STALE_RUN_MINUTES)
+    stale = SyncRun.objects.filter(
+        clinic_tin=scope.tin, branch_name=scope.branch, finished_at__isnull=True, started_at__lt=cutoff
+    ).filter(Q(push_status=SyncRun.STEP_RUNNING) | Q(pull_status=SyncRun.STEP_RUNNING))
+    for run in stale:
+        if run.push_status == SyncRun.STEP_RUNNING:
+            run.push_status = SyncRun.STEP_FAILED
+        else:
+            run.pull_status = SyncRun.STEP_FAILED
+        run.error_message = "This sync was interrupted (the clinic server restarted or lost its connection). Run it again."
+        run.finished_at = timezone.now()
+        run.save(update_fields=["push_status", "pull_status", "error_message", "finished_at"])
+
+
 class SyncStatusView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -105,6 +129,8 @@ class SyncStatusView(APIView):
             return Response({"detail": "Only clinic managers can see sync."}, status=status.HTTP_403_FORBIDDEN)
         from tenants.ops_mode_views import active_ops_mode_block, awaiting_step
         from tenants.services import resolve_tenant_account
+
+        expire_stale_runs(scope)
 
         state = SyncState.objects.filter(clinic_tin=scope.tin, branch_name=scope.branch).first()
         runs = SyncRun.objects.filter(clinic_tin=scope.tin, branch_name=scope.branch).order_by("-started_at")[:10]
@@ -234,16 +260,15 @@ def _start_in_background(request, scope, transport, run, kind):
     a while on a slow link. One sync at a time per branch.
     """
     import threading
-    from datetime import timedelta
 
     from django.db import connection
     from django.utils import timezone
 
+    expire_stale_runs(scope)
     busy = SyncRun.objects.filter(
         clinic_tin=scope.tin,
         branch_name=scope.branch,
         finished_at__isnull=True,
-        started_at__gte=timezone.now() - timedelta(minutes=10),
     ).filter(Q(push_status=SyncRun.STEP_RUNNING) | Q(pull_status=SyncRun.STEP_RUNNING)).first()
     if busy is not None and (run is None or busy.pk != run.pk):
         return Response(_run_json(busy), status=status.HTTP_202_ACCEPTED)

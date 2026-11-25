@@ -37,9 +37,16 @@ def resolve_file(url_path: str, root: Path | None = None) -> Path | None:
     return None
 
 
-def _file_response(path: Path, status: int = 200) -> FileResponse:
+def _file_response(path: Path, status: int = 200, head: bool = False):
     content_type, _ = mimetypes.guess_type(path.name)
-    response = FileResponse(open(path, "rb"), content_type=content_type or "application/octet-stream", status=status)
+    content_type = content_type or "application/octet-stream"
+    if head:
+        # A HEAD answer carries the headers only. Sending the file body here corrupts the browser's
+        # next request on the same connection (net::ERR_INVALID_HTTP_RESPONSE), which stalls page changes.
+        response = HttpResponse(status=status, content_type=content_type)
+        response["Content-Length"] = str(path.stat().st_size)
+    else:
+        response = FileResponse(open(path, "rb"), content_type=content_type, status=status)
     immutable = "_next" in path.parts and path.suffix not in {".html", ".txt"}
     response["Cache-Control"] = IMMUTABLE if immutable else NO_CACHE
     return response
@@ -57,10 +64,11 @@ def serve_frontend(request, path=""):
             "The web app is not installed on this clinic server (missing the dist-node folder). "
             "Run `npm run build:node` and copy it next to the backend."
         )
+    head = request.method == "HEAD"
     found = resolve_file(path, root)
     if found is not None:
-        return _file_response(found)
+        return _file_response(found, head=head)
     not_found = root / "404.html"
     if not_found.is_file():
-        return _file_response(not_found, status=404)
+        return _file_response(not_found, status=404, head=head)
     raise Http404("Page not found.")

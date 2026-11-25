@@ -86,6 +86,15 @@ class FrontendServingTests(SimpleTestCase):
             res = frontend.serve_frontend(self.factory.post("/manager/"), path="manager/")
         self.assertEqual(res.status_code, 405)
 
+    def test_a_head_request_gets_headers_and_no_body(self):
+        # A body on a HEAD answer corrupts the browser's next request on the same connection.
+        with override_settings(FRONTEND_DIR=str(self.root)):
+            res = frontend.serve_frontend(self.factory.head("/manager/"), path="manager/")
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(res.streaming)
+        self.assertEqual(res.content, b"")
+        self.assertEqual(res["Content-Length"], str(len("<h1>manager</h1>")))
+
     def test_a_server_without_the_app_says_so(self):
         with override_settings(FRONTEND_DIR=str(self.root / "missing")):
             with self.assertRaises(Http404):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from django.db.utils import OperationalError, ProgrammingError
+
 from .models import SubscriptionPricingRule
 
 DEFAULT_SETUP_FEE_ETB = 15000
@@ -40,25 +42,29 @@ def resolve_pricing(business_type: str = "Clinic", modules=None) -> dict:
     bt = (business_type or "Clinic").strip() or "Clinic"
     key = build_modules_key(modules or [])
 
-    row = (
-        SubscriptionPricingRule.objects.filter(
-            business_type=bt,
-            modules_key=key,
-            is_active=True,
-        )
-        .order_by("sort_order", "id")
-        .first()
-    )
-
-    if row is None and key == "":
+    try:
         row = (
             SubscriptionPricingRule.objects.filter(
                 business_type=bt,
+                modules_key=key,
                 is_active=True,
             )
             .order_by("sort_order", "id")
             .first()
         )
+
+        if row is None and key == "":
+            row = (
+                SubscriptionPricingRule.objects.filter(
+                    business_type=bt,
+                    is_active=True,
+                )
+                .order_by("sort_order", "id")
+                .first()
+            )
+    except (ProgrammingError, OperationalError):
+        # A clinic server has no pricing catalog table: use the built-in default fees.
+        row = None
 
     if row:
         return {
