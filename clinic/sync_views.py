@@ -4,6 +4,7 @@ Cloud (called by a clinic node with its node token):  POST push/, pull/, complet
 Manager (JWT):  GET status/, GET conflicts/  on either side;  POST run/, seed/  on a clinic node.
 """
 from django.conf import settings
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.response import Response
@@ -218,15 +219,54 @@ class _NodeRun(APIView):
             ).first()
             if run is None:
                 return Response({"detail": "Sync run not found."}, status=status.HTTP_404_NOT_FOUND)
-        run = run_sync(
-            scope,
-            HttpTransport(settings.CLOUD_API_URL, settings.NODE_TOKEN),
-            user=request.user,
-            kind=self.kind,
-            run=run,
-        )
+        transport = HttpTransport(settings.CLOUD_API_URL, settings.NODE_TOKEN)
+        if request.data.get("background"):
+            return _start_in_background(request, scope, transport, run, self.kind)
+        run = run_sync(scope, transport, user=request.user, kind=self.kind, run=run)
         failed = SyncRun.STEP_FAILED in (run.push_status, run.pull_status)
         return Response(_run_json(run), status=status.HTTP_502_BAD_GATEWAY if failed else status.HTTP_200_OK)
+
+
+def _start_in_background(request, scope, transport, run, kind):
+    """Start the sync on a worker thread and answer at once; the page follows it through /sync/status/.
+
+    The manager can keep working (or leave the page) while the cloud answers, which can take
+    a while on a slow link. One sync at a time per branch.
+    """
+    import threading
+    from datetime import timedelta
+
+    from django.db import connection
+    from django.utils import timezone
+
+    busy = SyncRun.objects.filter(
+        clinic_tin=scope.tin,
+        branch_name=scope.branch,
+        finished_at__isnull=True,
+        started_at__gte=timezone.now() - timedelta(minutes=10),
+    ).filter(Q(push_status=SyncRun.STEP_RUNNING) | Q(pull_status=SyncRun.STEP_RUNNING)).first()
+    if busy is not None and (run is None or busy.pk != run.pk):
+        return Response(_run_json(busy), status=status.HTTP_202_ACCEPTED)
+    if run is None:
+        run = SyncRun.objects.create(
+            clinic_tin=scope.tin, branch_name=scope.branch, kind=kind, started_by=request.user
+        )
+    run.push_status = SyncRun.STEP_RUNNING
+    run.save(update_fields=["push_status"])
+    user = request.user
+
+    def work():
+        try:
+            run_sync(scope, transport, user=user, kind=kind, run=run)
+        except Exception as exc:  # run_sync records expected failures; this is the unexpected rest
+            SyncRun.objects.filter(pk=run.pk).update(
+                push_status=SyncRun.STEP_FAILED, error_message=str(exc)[:2000], finished_at=timezone.now()
+            )
+        finally:
+            connection.close()
+
+    threading.Thread(target=work, daemon=True).start()
+    return Response(_run_json(run), status=status.HTTP_202_ACCEPTED)
 
 
 class BackupNowView(APIView):

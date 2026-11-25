@@ -393,6 +393,8 @@ TENANT_FIELDS = (
     "setup_fee_approved", "subscription_payment_approved", "subscription_paid_until",
     "paid_quarters_count", "billing_hold", "billing_started_at", "free_trial_ends_at",
     "modules", "ops_mode", "yearly_fee_etb", "billing_notes", "setup_fee_etb", "quarterly_fee_etb",
+    # Exempt / Apex-created clinics skip billing; the clinic server must know, or it blocks login.
+    "is_illustration", "provisioned_by_apex",
 )
 
 
