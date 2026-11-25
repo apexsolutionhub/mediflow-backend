@@ -214,6 +214,77 @@ class StaffPasswordSyncTests(SyncCase):
         self.assertEqual(len(export_credentials(SCOPE, since=None, db=CLOUD)), 1)
 
 
+class StaffCrudSyncTests(SyncCase):
+    """Staff added or changed on a clinic server reach the cloud on the next sync."""
+
+    def make_node_staff(self, name="doc1", role="doctor"):
+        user = get_user_model().objects.db_manager(NODE).create_user(name, password="node-pass-1")
+        UserProfile.objects.using(NODE).create(
+            user=user, clinic_tin=TIN, branch_name=BRANCH, role=role, clinic_name="Clinic", password_changed_at=timezone.now()
+        )
+        return user
+
+    def test_an_account_created_on_the_server_reaches_the_cloud(self):
+        self.seed_node()
+        self.make_node_staff()
+        run = self.sync()
+        self.assertEqual((run.push_status, run.pull_status), ("ok", "ok"), run.error_message)
+        self.assertEqual(run.receipt["push"]["staff_changes"]["applied"], 1)
+        cloud = get_user_model().objects.get(username="doc1")
+        self.assertTrue(cloud.check_password("node-pass-1"))
+        self.assertEqual((cloud.profile.clinic_tin, cloud.profile.role), (TIN, "doctor"))
+
+    def test_a_username_used_by_another_clinic_is_refused(self):
+        other = get_user_model().objects.create_user("doc1", password="theirs-1")
+        UserProfile.objects.create(user=other, clinic_tin="OTHER-TIN", branch_name="Other", role="doctor")
+        self.seed_node()
+        self.make_node_staff()
+        run = self.sync()
+        self.assertEqual(run.receipt["push"]["staff_changes"]["rejected"], [{"username": "doc1", "reason": "username_taken"}])
+        other.refresh_from_db()
+        self.assertTrue(other.check_password("theirs-1"))
+        self.assertEqual(other.profile.clinic_tin, "OTHER-TIN")
+
+    def test_a_second_active_account_for_a_role_is_refused(self):
+        existing = get_user_model().objects.create_user("cloud-doc", password="x-1")
+        UserProfile.objects.create(user=existing, clinic_tin=TIN, branch_name=BRANCH, role="doctor")
+        self.seed_node()
+        self.make_node_staff()
+        run = self.sync()
+        self.assertEqual(run.receipt["push"]["staff_changes"]["rejected"], [{"username": "doc1", "reason": "role_exists"}])
+
+    def test_deactivating_on_the_server_reaches_the_cloud(self):
+        cloud_user = get_user_model().objects.create_user("nurse9", password="x-1")
+        UserProfile.objects.create(user=cloud_user, clinic_tin=TIN, branch_name=BRANCH, role="nurse")
+        self.seed_node()
+        node_user = get_user_model().objects.using(NODE).get(username="nurse9")
+        node_user.is_active = False
+        node_user.save(using=NODE)
+        node_profile = node_user.profile
+        node_profile.is_active = False
+        node_profile.save(using=NODE)
+        self.sync()
+        cloud_user.refresh_from_db()
+        self.assertFalse(cloud_user.is_active)
+        self.assertFalse(cloud_user.profile.is_active)
+
+    def test_a_newer_cloud_edit_is_not_undone_by_an_older_server_copy(self):
+        cloud_user = get_user_model().objects.create_user("nurse9", password="x-1")
+        UserProfile.objects.create(user=cloud_user, clinic_tin=TIN, branch_name=BRANCH, role="nurse")
+        self.seed_node()
+        node_profile = UserProfile.objects.using(NODE).get(user__username="nurse9")
+        node_profile.role = "lab"
+        node_profile.save(using=NODE)
+        UserProfile.objects.using(NODE).filter(pk=node_profile.pk).update(updated_at=timezone.now() - timedelta(hours=3))
+        cloud_profile = UserProfile.objects.get(user=cloud_user)
+        cloud_profile.role = "radiology"
+        cloud_profile.save()
+        self.sync()
+        cloud_profile.refresh_from_db()
+        self.assertEqual(cloud_profile.role, "radiology")
+        self.assertEqual(UserProfile.objects.using(NODE).get(user__username="nurse9").role, "radiology")
+
+
 class StaffApiTests(TestCase):
     def setUp(self):
         self.mgr = _manager("stfmgr")
@@ -236,16 +307,24 @@ class StaffApiTests(TestCase):
         self.assertIsNotNone(self.nurse.profile.password_changed_at)
 
     @override_settings(NODE_MODE="clinic")
-    def test_a_clinic_server_only_lets_passwords_change(self):
-        self.assertEqual(self.client.post("/api/user/", {"username": "new", "password": "p-1234567", "role": "nurse"}, format="json").status_code, 403)
-        self.assertEqual(self.client.delete(f"/api/user/{self.nurse.id}/").status_code, 403)
-        self.assertEqual(self.client.patch(f"/api/user/{self.nurse.id}/", {"role": "doctor"}, format="json").status_code, 403)
-        self.assertEqual(self.client.patch(f"/api/user/{self.nurse.id}/", {"is_active": False}, format="json").status_code, 403)
-        ok = self.client.patch(f"/api/user/{self.nurse.id}/", {"password": "reset-pass-4"}, format="json")
-        self.assertEqual(ok.status_code, 200, ok.content)
+    def test_a_clinic_server_manages_its_own_staff(self):
+        # A signed-in manager's browser always sends its token; the guard only blocks an anonymous sign-up.
+        created = self.client.post(
+            "/api/user/",
+            {"username": "newdoc", "password": "p-1234567", "role": "doctor"},
+            format="json",
+            HTTP_AUTHORIZATION="Bearer test",
+        )
+        self.assertEqual(created.status_code, 201, created.content)
+        changed = self.client.patch(f"/api/user/{self.nurse.id}/", {"role": "lab"}, format="json")
+        self.assertEqual(changed.status_code, 200, changed.content)
         self.nurse.refresh_from_db()
-        self.assertTrue(self.nurse.check_password("reset-pass-4"))
-        self.assertEqual(self.nurse.profile.role, "nurse")
+        self.assertEqual(self.nurse.profile.role, "lab")
+        # "Delete" on a server deactivates: the sync can carry that to the cloud, a vanished row it could not.
+        self.assertEqual(self.client.delete(f"/api/user/{self.nurse.id}/").status_code, 204)
+        self.nurse.refresh_from_db()
+        self.assertFalse(self.nurse.is_active)
+        self.assertFalse(self.nurse.profile.is_active)
 
     @override_settings(NODE_MODE="cloud")
     def test_the_cloud_still_manages_staff_fully(self):

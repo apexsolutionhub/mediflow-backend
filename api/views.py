@@ -52,35 +52,14 @@ class UserViewSet(viewsets.ModelViewSet):
             qs = qs.filter(profile__branch_name__iexact=branch)
         return qs
 
-    # Staff accounts are managed on the cloud and copied to a clinic server by sync (cloud wins), so changes made
-    # on the server would be undone by the next sync. Only a password change travels back up.
+    # A clinic server manages its own staff offline. Accounts created or edited there travel up on the next sync
+    # (see sync_engine.apply_staff_changes); the cloud refuses one only if the username belongs to another clinic.
     def _on_clinic_server(self) -> bool:
         from django.conf import settings
 
         return getattr(settings, "NODE_MODE", "cloud") == "clinic"
 
-    def create(self, request, *args, **kwargs):
-        if self._on_clinic_server():
-            return Response(
-                {"detail": "Staff accounts are created on the cloud. Add them there, then sync this server."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        return super().create(request, *args, **kwargs)
-
-    def update(self, request, *args, **kwargs):
-        if self._on_clinic_server() and set(request.data.keys()) - {"password"}:
-            return Response(
-                {"detail": "Roles and access are managed on the cloud. On this server you can only change a password."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        return super().update(request, *args, **kwargs)
-
     def destroy(self, request, *args, **kwargs):
-        if self._on_clinic_server():
-            return Response(
-                {"detail": "Staff accounts are removed on the cloud. Remove them there, then sync this server."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
         actor_profile = getattr(request.user, "profile", None)
         if not actor_profile or (actor_profile.role or "").lower() != "manager":
             return Response(
@@ -99,6 +78,16 @@ class UserViewSet(viewsets.ModelViewSet):
                 {"detail": "Manager accounts cannot be deleted from staff tools."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if self._on_clinic_server():
+            # Deactivate instead of delete: the account's name stays on past records, and "inactive" is a change
+            # the next sync can carry to the cloud (a deleted row leaves nothing to send).
+            target.is_active = False
+            target.save(update_fields=["is_active"])
+            profile = getattr(target, "profile", None)
+            if profile is not None:
+                profile.is_active = False
+                profile.save(update_fields=["is_active", "updated_at"])
+            return Response(status=status.HTTP_204_NO_CONTENT)
         target.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 

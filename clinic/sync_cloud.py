@@ -22,6 +22,7 @@ from .sync_engine import (
     SyncError,
     _when,
     apply_credentials,
+    apply_staff_changes,
     apply_scope,
     delta_since,
     delta_token,
@@ -111,6 +112,8 @@ def handle_push(node: SyncNode, body: dict, db="default") -> tuple[int, dict]:
     run.receipt = {
         **result.as_dict(),
         "billing_verdicts": receive_submissions(scope.tin, body.get("billing_submissions") or []),
+        # Staff first, so a password changed for a brand-new account lands on the account just created.
+        "staff_changes": apply_staff_changes(scope, body.get("staff_changes") or [], db=db),
         "staff_credentials": apply_credentials(scope, body.get("staff_credentials") or [], db=db),
     }
     run.save(using=db, update_fields=["push_status", "error_message", "finished_at", "receipt"])

@@ -413,6 +413,7 @@ def export_staff(scope: Scope, db="default") -> list:
             "email": p.user.email,
             "is_active": p.user.is_active,
             "password_changed_at": _json(p.password_changed_at),
+            "updated_at": _json(p.updated_at),
             "profile": {
                 "clinic_name": p.clinic_name,
                 "role": p.role,
@@ -423,6 +424,95 @@ def export_staff(scope: Scope, db="default") -> list:
         }
         for p in profiles
     ]
+
+
+def export_staff_changes(scope: Scope, since=None, db="default") -> list:
+    """Staff accounts added or edited on this clinic server since the last push (managers travel by cloud only)."""
+    from api.models import UserProfile
+
+    staff = export_staff(scope, db=db)
+    stamps = {
+        p.user.username: p.updated_at
+        for p in UserProfile.objects.using(db).filter(clinic_tin=scope.tin, branch_name__iexact=scope.branch).select_related("user")
+    }
+    return [
+        item
+        for item in staff
+        if (item["profile"]["role"] or "").lower() != "manager"
+        and (since is None or (stamps.get(item["username"]) and stamps[item["username"]] > since))
+    ]
+
+
+def apply_staff_changes(scope: Scope, items: list, db="default") -> dict:
+    """Cloud side: take staff accounts a clinic server created or edited.
+
+    A username already used by another clinic is refused (it must stay unique across the system); the node is
+    told which ones and why. If the cloud's copy is newer, the cloud's copy stays.
+    """
+    from django.contrib.auth.hashers import identify_hasher
+
+    from api.models import UserProfile
+    from api.serializers import STAFF_ROLES
+
+    User = get_user_model()
+    applied = skipped = 0
+    rejected = []
+    for item in items or []:
+        try:
+            username = str(item["username"]).strip()
+            password = str(item["password"])
+            profile_data = item["profile"]
+            role = str(profile_data["role"]).strip().lower()
+            incoming = _when(item.get("updated_at"))
+            if not password.startswith("!"):
+                identify_hasher(password)
+        except (KeyError, ValueError, TypeError):
+            skipped += 1
+            continue
+        if not username or role not in STAFF_ROLES:
+            rejected.append({"username": username, "reason": "invalid"})
+            continue
+        existing = User.objects.using(db).filter(username__iexact=username).first()
+        profile = UserProfile.objects.using(db).filter(user=existing).first() if existing else None
+        if existing is not None and (
+            profile is None
+            or profile.clinic_tin != scope.tin
+            or (profile.branch_name or "").strip().lower() != scope.branch.strip().lower()
+        ):
+            rejected.append({"username": username, "reason": "username_taken"})
+            continue
+        if profile is not None:
+            if (profile.role or "").lower() == "manager":
+                skipped += 1
+                continue
+            if incoming is None or (profile.updated_at and profile.updated_at >= incoming):
+                skipped += 1
+                continue
+        elif profile_data.get("is_active", True) and UserProfile.objects.using(db).filter(
+            clinic_tin=scope.tin, branch_name__iexact=scope.branch, role__iexact=role, is_active=True
+        ).exists():
+            rejected.append({"username": username, "reason": "role_exists"})
+            continue
+        with transaction.atomic(using=db):
+            user = existing or User(username=username)
+            for name in ("first_name", "last_name", "email"):
+                setattr(user, name, str(item.get(name) or ""))
+            user.is_active = bool(item.get("is_active", True))
+            user.password = password
+            user.save(using=db)
+            profile = profile or UserProfile(user=user)
+            profile.clinic_tin = scope.tin
+            profile.branch_name = scope.branch
+            profile.role = role
+            profile.clinic_name = str(profile_data.get("clinic_name") or profile.clinic_name or "")
+            profile.logoUrl = str(profile_data.get("logoUrl") or "")
+            profile.is_active = bool(profile_data.get("is_active", True))
+            profile.password_changed_at = _when(item.get("password_changed_at")) or profile.password_changed_at
+            profile.save(using=db)
+            if incoming is not None:  # keep the node's stamp so the next pull sees the same version
+                UserProfile.objects.using(db).filter(pk=profile.pk).update(updated_at=incoming)
+        applied += 1
+    return {"applied": applied, "skipped": skipped, "rejected": rejected}
 
 
 def apply_staff(scope: Scope, staff: list, db="default") -> int:
@@ -454,6 +544,10 @@ def apply_staff(scope: Scope, staff: list, db="default") -> int:
             if not keep_local_password:
                 profile.password_changed_at = incoming_changed
             profile.save(using=db)
+            stamp = _when(item.get("updated_at"))
+            if stamp is not None:
+                # Keep the cloud's time on the row, so only edits made on this server look "new" to the next push.
+                UserProfile.objects.using(db).filter(pk=profile.pk).update(updated_at=stamp)
     return len(staff)
 
 

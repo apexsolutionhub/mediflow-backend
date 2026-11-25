@@ -24,6 +24,7 @@ from .sync_engine import (
     apply_tenant,
     export_credentials,
     export_scope,
+    export_staff_changes,
 )
 
 PUSH_MARGIN = timedelta(minutes=5)  # re-send a little before the last run so a clock hiccup loses nothing
@@ -190,6 +191,7 @@ def run_sync(scope: Scope, transport, user=None, kind=SyncRun.KIND_SYNC, run=Non
                         "entities": export_scope(scope, since=since, db=db),
                         "billing_submissions": export_local_submissions(scope.tin, db),
                         "staff_credentials": export_credentials(scope, since, db),
+                        "staff_changes": export_staff_changes(scope, since, db),
                     }
                 )
                 apply_remap(receipt.get("remap") or {}, db)
