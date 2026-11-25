@@ -101,6 +101,9 @@ def _via_cloud(path: str, payload: dict, success_status: int = 200):
     try:
         return Response(sync_billing.cloud_call(path, payload), status=success_status)
     except TransportError as exc:
+        if exc.code == "token_rejected":
+            # Not the user's session: never answer 401 here, the app would sign them out.
+            return Response({"detail": str(exc), "code": "token_rejected"}, status=503)
         if exc.status and exc.status < 500:
             return Response({"detail": str(exc)}, status=exc.status)
         return Response({"detail": CLOUD_NEEDED, "code": "cloud_unreachable"}, status=503)

@@ -204,7 +204,10 @@ class _NodeRun(APIView):
             )
         if not (settings.CLOUD_API_URL and settings.NODE_TOKEN):
             return Response(
-                {"detail": "This clinic server is not linked to the cloud yet (CLOUD_API_URL / NODE_TOKEN)."},
+                {
+                    "detail": "This clinic server has no sync token yet. Ask Apex for one, put it in NODE_TOKEN "
+                    "in BackEnd/.env on this PC (with CLOUD_API_URL), then restart the clinic server."
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
         run = None

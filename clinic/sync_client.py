@@ -29,10 +29,17 @@ from .sync_engine import (
 PUSH_MARGIN = timedelta(minutes=5)  # re-send a little before the last run so a clock hiccup loses nothing
 
 
+TOKEN_REJECTED_MESSAGE = (
+    "The cloud no longer accepts this server's sync token (it was revoked or replaced). "
+    "Ask Apex for a new token, put it in NODE_TOKEN in BackEnd/.env on this PC, then restart the clinic server."
+)
+
+
 class TransportError(Exception):
-    def __init__(self, message, status=None):
+    def __init__(self, message, status=None, code=None):
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 class HttpTransport:
@@ -58,6 +65,9 @@ class HttpTransport:
                 detail = json.loads(exc.read().decode("utf-8")).get("detail", "")
             except Exception:
                 detail = ""
+            if exc.code in (401, 403):
+                # Only a token problem looks like this: say what it is and who can fix it.
+                raise TransportError(TOKEN_REJECTED_MESSAGE, exc.code, code="token_rejected") from exc
             raise TransportError(detail or f"The cloud answered {exc.code}.", exc.code) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise TransportError("The cloud is unreachable. Check the internet connection.") from exc

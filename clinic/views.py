@@ -1074,7 +1074,15 @@ class ClinicBranchViewSet(TenantScopedMixin, viewsets.ModelViewSet):
         is_main = bool(serializer.validated_data.get("is_main"))
         if is_main:
             ClinicBranch.objects.filter(clinic_tin__iexact=tin, is_main=True).update(is_main=False)
-        branch_tin = (serializer.validated_data.get("branch_tin") or self.get_clinic_tin()).strip()
+        branch_tin = (serializer.validated_data.get("branch_tin") or "").strip()
+        if not branch_tin and not is_main:
+            # A branch without a TIN gets its own unique one, never the organization's: it keeps its own
+            # billing, staff, mode and sync token. The main branch is the organization's own location.
+            from tenants.services import generate_clinic_tin
+
+            branch_tin = generate_clinic_tin()
+        elif not branch_tin:
+            branch_tin = self.get_clinic_tin()
         branch = serializer.save(clinic_tin=tin, branch_tin=branch_tin)
         if not ClinicBranch.objects.filter(clinic_tin__iexact=tin).exclude(pk=branch.pk).exists():
             if not branch.is_main:

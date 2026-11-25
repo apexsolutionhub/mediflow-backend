@@ -154,6 +154,13 @@ class ChatTests(TestCase):
         self.assertEqual(TenantFeedbackThread.objects.count(), 0)
 
     @override_settings(**NODE_SETTINGS)
+    def test_a_rejected_token_is_a_503_never_a_401_that_would_sign_the_user_out(self):
+        rejected = TransportError("token revoked", 401, code="token_rejected")
+        with mock.patch(CALL, side_effect=rejected):
+            res = self.client.post("/api/billing/feedback/send/", {"body": "hi"}, format="json")
+        self.assertEqual((res.status_code, res.json()["code"]), (503, "token_rejected"))
+
+    @override_settings(**NODE_SETTINGS)
     def test_a_refusal_from_the_cloud_is_passed_on_not_called_an_outage(self):
         with mock.patch(CALL, side_effect=self.to_cloud):
             res = self.client.post("/api/billing/feedback/send/", {"body": "  "}, format="json")
@@ -172,6 +179,35 @@ class ChatTests(TestCase):
         self.assertEqual(client.post("/api/sync/feedback/thread/", {}, format="json").status_code, 200)
         self.assertEqual(client.post("/api/sync/feedback/unread/", {}, format="json").status_code, 200)
         self.assertIn(APIClient().post("/api/sync/feedback/send/", {"body": "x"}, format="json").status_code, (401, 403))
+
+
+class TokenRejectedTests(TestCase):
+    """A revoked or replaced token must say so in plain words, not "the cloud answered 401"."""
+
+    def _answer(self, code):
+        import io
+        import urllib.error
+
+        return urllib.error.HTTPError("https://c/api/sync/push/", code, "x", {}, io.BytesIO(b'{"detail": "Invalid node token."}'))
+
+    def test_a_401_from_the_cloud_means_the_token_was_rejected(self):
+        from clinic.sync_client import HttpTransport
+
+        for code in (401, 403):
+            with mock.patch("urllib.request.urlopen", side_effect=self._answer(code)):
+                with self.assertRaises(TransportError) as raised:
+                    HttpTransport("https://c/api", "mfn_old").push({})
+            self.assertEqual((raised.exception.code, raised.exception.status), ("token_rejected", code))
+            self.assertIn("Ask Apex for a new token", str(raised.exception))
+            self.assertIn("NODE_TOKEN", str(raised.exception))
+
+    def test_other_errors_keep_their_own_message(self):
+        from clinic.sync_client import HttpTransport
+
+        with mock.patch("urllib.request.urlopen", side_effect=self._answer(500)):
+            with self.assertRaises(TransportError) as raised:
+                HttpTransport("https://c/api", "mfn_old").push({})
+        self.assertIsNone(raised.exception.code)
 
 
 @override_settings(**NODE_SETTINGS)
