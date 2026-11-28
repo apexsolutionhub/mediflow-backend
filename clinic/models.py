@@ -105,6 +105,10 @@ class Patient(SyncMixin):
         ordering = ["-created_at"]
 
 
+PRIORITIES = (("very_high", "Very high"), ("high", "High"), ("normal", "Normal"))
+PRIORITY_RANK = {"very_high": 0, "high": 1, "normal": 2}
+
+
 class Encounter(SyncMixin):
     STATUS_OPEN = "open"
     STATUS_ACTIVE = "active"
@@ -118,6 +122,18 @@ class Encounter(SyncMixin):
     arrival_type = models.CharField(max_length=20, choices=ARRIVAL_CHOICES)
     status = models.CharField(max_length=20, default=STATUS_OPEN, db_index=True)
     referral_source = models.CharField(max_length=255, blank=True)
+    # How soon the patient is seen (boards and queues sort by it), and the rules picked at registration.
+    priority = models.CharField(max_length=10, choices=PRIORITIES, default="normal", db_default="normal")
+    discount_rule = models.ForeignKey(
+        "PaymentRule", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    refund_rule = models.ForeignKey(
+        "PaymentRule", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    # Set when the visit exists because another branch referred the patient here.
+    referral_from = models.ForeignKey(
+        "Referral", on_delete=models.SET_NULL, null=True, blank=True, related_name="received_visits"
+    )
     opened_at = models.DateTimeField(auto_now_add=True)
     closed_at = models.DateTimeField(null=True, blank=True)
     opened_by = models.ForeignKey(
@@ -154,6 +170,8 @@ class BillableService(SyncMixin):
     auto_add_on_registration = models.BooleanField(default=False)
     requires_payment_before_work = models.BooleanField(default=True)
     internal_notes = models.TextField(blank=True)
+    # Referral patients arrive with their results, so they are only charged for services that say so.
+    includes_referral_patients = models.BooleanField(default=False, db_default=False)
 
     class Meta:
         unique_together = ("clinic_tin", "code", "branch_name")
@@ -187,6 +205,20 @@ class PaymentTransaction(SyncMixin):
     processed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    # One approval can be paid in several ways (cash + bank): the parts share an invoice number,
+    # and each part has its own receipt.
+    invoice_number = models.CharField(max_length=40, blank=True, default="")
+    processed_by_name = models.CharField(max_length=255, blank=True, default="")
+    # What this approval also settled without cash, recorded for the reports.
+    discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    discount_rule_name = models.CharField(max_length=120, blank=True, default="")
+    discount_reason = models.CharField(max_length=255, blank=True, default="")
+    forgiven_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    vat_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # Set when someone else paid this visit's bill (the payer's patient record).
+    paid_by_patient = models.ForeignKey(
+        "Patient", on_delete=models.SET_NULL, null=True, blank=True, related_name="payments_made_for_others"
+    )
 
 
 class RefundTransaction(SyncMixin):
@@ -196,6 +228,57 @@ class RefundTransaction(SyncMixin):
     processed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     status = models.CharField(max_length=20, default="OpenRefund")
+    processed_by_name = models.CharField(max_length=255, blank=True, default="")
+    rule_name = models.CharField(max_length=120, blank=True, default="")
+
+
+class PaymentRule(SyncMixin):
+    """A discount or refund rule the manager set up: a percentage off some (or all) services."""
+
+    KIND_DISCOUNT, KIND_REFUND = "discount", "refund"
+    KINDS = ((KIND_DISCOUNT, "Discount"), (KIND_REFUND, "Refund"))
+
+    clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    kind = models.CharField(max_length=10, choices=KINDS)
+    name = models.CharField(max_length=120)
+    reason = models.CharField(max_length=255)
+    all_services = models.BooleanField(default=False)
+    service_ids = models.JSONField(default=list, blank=True)
+    percent = models.DecimalField(max_digits=5, decimal_places=2)
+
+    SOFT_DELETE_RENAME = "name"
+
+    class Meta:
+        ordering = ["kind", "name"]
+
+    def covers(self, service_id):
+        return self.all_services or (service_id is not None and service_id in (self.service_ids or []))
+
+
+class ForgivenAmount(SyncMixin):
+    """Part of a bill the clinic waives. It needs the manager's approval before reception can take the payment."""
+
+    PENDING, APPROVED, DECLINED, SUPERSEDED, APPLIED = "pending", "approved", "declined", "superseded", "applied"
+
+    encounter = models.ForeignKey(Encounter, on_delete=models.CASCADE, related_name="forgiven_amounts")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    reason = models.CharField(max_length=255)
+    status = models.CharField(max_length=12, default=PENDING)
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+"
+    )
+    requested_by_name = models.CharField(max_length=255, blank=True, default="")
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    decided_by_name = models.CharField(max_length=255, blank=True, default="")
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decision_note = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
 
 
 class ClinicalOrder(SyncMixin):
@@ -230,6 +313,11 @@ class ClinicalOrder(SyncMixin):
     # Prescriptions: how much to sell, counted in whole packs or loose units (tablets...).
     quantity = models.PositiveIntegerField(default=1, db_default=1)
     sale_unit = models.CharField(max_length=8, default="pack", db_default="pack")
+    # When the treatment ends (a calendar date), or "till the medicine ends" when it has no fixed end.
+    duration_end = models.DateField(null=True, blank=True)
+    till_medicine_ends = models.BooleanField(default=False, db_default=False)
+    # Shown to the doctor and the pharmacist when the medicine expires soon after the treatment ends.
+    expiry_warning = models.CharField(max_length=255, blank=True, default="", db_default="")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -249,7 +337,10 @@ class DoctorChart(SyncMixin):
 class NurseNote(SyncMixin):
     encounter = models.ForeignKey(Encounter, on_delete=models.CASCADE, related_name="nurse_notes")
     note_type = models.CharField(max_length=40, default="progress")
-    content = models.TextField()
+    # Which kind of assessment this is and where in the visit it was taken (see clinic/vitals.py).
+    assessment_type = models.CharField(max_length=24, default="general_adult", db_default="general_adult")
+    stage = models.CharField(max_length=24, default="initial", db_default="initial")
+    content = models.TextField(blank=True, default="")
     vitals = models.JSONField(default=dict, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -258,11 +349,34 @@ class NurseNote(SyncMixin):
 class Appointment(SyncMixin):
     clinic_tin = models.CharField(max_length=50, db_index=True)
     branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    KIND_REGISTRY = "registry"
+    KIND_FOLLOW_UP = "follow_up"
+    KIND_CHOICES = ((KIND_REGISTRY, "Registry"), (KIND_FOLLOW_UP, "Follow-up"))
+
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name="appointments")
     scheduled_at = models.DateTimeField()
     reason = models.CharField(max_length=255, blank=True)
+    # A doctor's follow-up belongs to the visit it was scheduled in (by encounter number); reception's are registry.
+    kind = models.CharField(max_length=16, choices=KIND_CHOICES, default=KIND_REGISTRY, db_default=KIND_REGISTRY)
+    encounter_number = models.CharField(max_length=40, blank=True, default="", db_default="")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    # Scheduled and rescheduled are both "still to come"; done, no show and cancelled are final.
+    STATUS_CHOICES = (
+        ("scheduled", "Scheduled"),
+        ("rescheduled", "Rescheduled"),
+        ("done", "Done"),
+        ("no_show", "No-show"),
+        ("cancelled", "Cancelled"),
+    )
+    ACTIVE = ("scheduled", "rescheduled")
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default="scheduled", db_default="scheduled")
+    rescheduled_count = models.PositiveIntegerField(default=0, db_default=0)
+    priority = models.CharField(max_length=10, choices=PRIORITIES, default="normal", db_default="normal")
+    discount_rule = models.ForeignKey("PaymentRule", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    refund_rule = models.ForeignKey("PaymentRule", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    # Set when the user chose to keep this appointment at the same time as an already saved one.
+    merged_with = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True, related_name="merged_here")
 
 
 class Supplier(SyncMixin):
@@ -409,10 +523,12 @@ class Referral(SyncMixin):
     APPROVAL_PENDING = "pending"
     APPROVAL_APPROVED = "approved"
     APPROVAL_REJECTED = "rejected"
+    APPROVAL_DISQUALIFIED = "disqualified"
     APPROVAL_CHOICES = (
         (APPROVAL_PENDING, "Pending manager approval"),
         (APPROVAL_APPROVED, "Approved"),
         (APPROVAL_REJECTED, "Rejected"),
+        (APPROVAL_DISQUALIFIED, "Disqualified"),
     )
 
     encounter = models.ForeignKey(Encounter, on_delete=models.CASCADE, related_name="referrals")
@@ -435,6 +551,14 @@ class Referral(SyncMixin):
         related_name="approved_referrals",
     )
     approved_at = models.DateTimeField(null=True, blank=True)
+    priority = models.CharField(max_length=10, choices=PRIORITIES, default="normal", db_default="normal")
+    # The sending branch's reception approves a branch-to-branch referral before it is printed.
+    reception_approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    reception_approved_at = models.DateTimeField(null=True, blank=True)
+    printed_at = models.DateTimeField(null=True, blank=True)
+    disqualified_reason = models.CharField(max_length=255, blank=True, default="", db_default="")
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -734,3 +858,68 @@ class SyncConflict(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class TreatmentAssignment(SyncMixin):
+    """The doctor asks the nurse for measurements at one stage of a patient's open visit."""
+
+    ACTIVE, EXPIRED = "active", "expired"
+
+    encounter = models.ForeignKey(Encounter, on_delete=models.CASCADE, related_name="treatment_assignments")
+    stage = models.CharField(max_length=24)
+    status = models.CharField(max_length=10, default=ACTIVE, db_default=ACTIVE, db_index=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
+    created_by_name = models.CharField(max_length=255, blank=True, default="")
+    reassigned_from = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True, related_name="copies")
+    created_at = models.DateTimeField(auto_now_add=True)
+    expired_at = models.DateTimeField(null=True, blank=True)
+    results_by_name = models.CharField(max_length=255, blank=True, default="")
+    results_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+
+class TreatmentField(SyncMixin):
+    """One measurement the nurse is asked for, built like a lab result field; `value` is the nurse's reading."""
+
+    assignment = models.ForeignKey(TreatmentAssignment, on_delete=models.CASCADE, related_name="fields")
+    name = models.CharField(max_length=120)
+    result_type = models.CharField(max_length=16, default="numeric")
+    unit = models.CharField(max_length=32, blank=True, default="")
+    ref_low = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    ref_high = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    critical_low = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    critical_high = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    choices = models.CharField(max_length=255, blank=True, default="")
+    sort_order = models.PositiveIntegerField(default=0)
+    value = models.CharField(max_length=255, blank=True, default="")
+    flag = models.CharField(max_length=16, blank=True, default="")
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+
+    def as_parameter(self):
+        """An unsaved lab parameter with the same rules, so values are checked the way lab results are."""
+        return LabTestParameter(
+            name=self.name, result_type=self.result_type, unit=self.unit, ref_low=self.ref_low,
+            ref_high=self.ref_high, critical_low=self.critical_low, critical_high=self.critical_high,
+            choices=self.choices,
+        )
+
+
+class TreatmentTemplate(SyncMixin):
+    """A saved set of measurements the doctor can reuse for Status Treatment instead of writing it again."""
+
+    SOFT_DELETE_RENAME = "name"
+
+    clinic_tin = models.CharField(max_length=50, db_index=True)
+    branch_name = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    name = models.CharField(max_length=120)
+    # The measurement lines exactly as they are sent when assigning: name, result_type, unit, ranges, choices.
+    fields = models.JSONField(default=list)
+    created_by_name = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]

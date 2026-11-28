@@ -131,6 +131,17 @@ def export_scope(scope: Scope, since=None, db="default") -> dict:
     return out
 
 
+def count_changes(scope: Scope, since=None, db="default") -> int:
+    """How many rows changed in this branch after `since`: what a push would carry (no data is read)."""
+    total = 0
+    for ent in ENTITIES:
+        qs = _rows(ent.model).using(db).filter(scope_q(ent, scope.tin, scope.branch))
+        if since is not None:
+            qs = qs.filter(**{f"{ent.stamp}__gt": since})
+        total += qs.count()
+    return total
+
+
 # ---------- apply ----------
 class _Apply:
     def __init__(self, scope, mode, db, since_token, local_cutoff):

@@ -8,7 +8,9 @@ from tenants.billing import PAYMENT_CHANNELS, billing_snapshot, catalog_default_
 from tenants.models import TenantAccount
 from tenants.services import ensure_tenant_account, generate_clinic_tin, resolve_tenant_account
 
+from . import audit
 from .models import UserProfile
+from .persons import ensure_default_person, identify
 
 User = get_user_model()
 STAFF_ROLES = {"reception", "doctor", "nurse", "lab", "radiology", "pharmacist"}
@@ -27,10 +29,12 @@ class UserSerializer(serializers.ModelSerializer):
     payment_transaction_ref = serializers.CharField(write_only=True, required=False, allow_blank=True)
     sales_agent_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
     ops_mode = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    person_name = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
         model = User
         fields = [
+            "person_name",
             "id",
             "username",
             "password",
@@ -136,7 +140,7 @@ class UserSerializer(serializers.ModelSerializer):
                     {
                         "role": [
                             f"A {role} credential already exists for this branch. "
-                            "Delete or deactivate it before creating another."
+                            "Add people to it instead of creating another."
                         ]
                     }
                 )
@@ -164,7 +168,10 @@ class UserSerializer(serializers.ModelSerializer):
         user.save()
         if password:
             profile_data["password_changed_at"] = timezone.now()
-        UserProfile.objects.create(user=user, **profile_data)
+        profile = UserProfile.objects.create(user=user, **profile_data)
+        if not is_self_signup and password:
+            # The password set here belongs to the role's first (default) person.
+            ensure_default_person(profile, validated_data.pop("person_name", ""))
 
         if is_self_signup:
             from tenants.sales_agents import resolve_sales_agent
@@ -230,8 +237,41 @@ class ChangePasswordSerializer(serializers.Serializer):
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    def _sign_in(self, attrs):
+        """Check the password against the role login and the people under it.
+
+        Returns the tokens, or None when nobody has this username and password (the caller then lets the standard
+        sign-in raise its usual error). Several people share a role's username; their own password tells them apart,
+        and the matched person is carried in the token so every later action can name who did it.
+        """
+        username = (attrs.get(self.username_field) or "").strip()
+        password = attrs.get("password") or ""
+        user = User.objects.filter(username__iexact=username).select_related("profile").first()
+        if user is None or not user.is_active:
+            return None
+        profile = getattr(user, "profile", None)
+        person = None
+        if profile is not None and (profile.role or "").lower() != "manager":
+            matched, person = identify(profile, password)
+            if matched and person is None and not profile.persons.exists():
+                person = ensure_default_person(profile)
+        else:
+            matched = user.check_password(password)
+        if not matched:
+            return None
+        self.user = user
+        self.person = person
+        refresh = self.get_token(user)
+        if person is not None:
+            refresh["person_id"] = person.id
+            refresh["person_name"] = person.full_name
+        return {"refresh": str(refresh), "access": str(refresh.access_token)}
+
     def validate(self, attrs):
-        data = super().validate(attrs)
+        self.person = None
+        data = self._sign_in(attrs)
+        if data is None:
+            data = super().validate(attrs)  # raises the standard "no active account" error
         profile = getattr(self.user, "profile", None)
         if profile and not profile.is_active:
             raise AuthenticationFailed("This staff account is deactivated.")
@@ -256,6 +296,19 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         if decision.access_mode == "denied":
             raise AuthenticationFailed(decision.detail or "Access denied.")
         data["user"] = UserSerializer(self.user).data
+        data["person"] = (
+            {"id": self.person.id, "name": self.person.full_name, "is_default": self.person.is_default}
+            if self.person is not None
+            else None
+        )
+        audit.record(
+            self.context.get("request"),
+            action="login",
+            entity="session",
+            summary="Signed in",
+            user=self.user,
+            person=self.person,
+        )
         data["sync_gate"] = gate
         data["access_mode"] = decision.access_mode
         data["payment_kind"] = decision.payment_kind

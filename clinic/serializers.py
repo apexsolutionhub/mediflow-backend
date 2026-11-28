@@ -2,6 +2,8 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
+from . import billing
+from . import vitals as vitals_mod
 from .models import (
     Appointment,
     BillableItem,
@@ -18,6 +20,8 @@ from .models import (
     OrderResultValue,
     Patient,
     MedicineDamage,
+    ForgivenAmount,
+    PaymentRule,
     PaymentTransaction,
     RadiologyReport,
     Referral,
@@ -49,9 +53,13 @@ class PatientSerializer(serializers.ModelSerializer):
 
 class BillableItemSerializer(serializers.ModelSerializer):
     total_amount = serializers.SerializerMethodField()
+    vat_amount = serializers.SerializerMethodField()
 
     def get_total_amount(self, obj):
         return obj.total_amount
+
+    def get_vat_amount(self, obj):
+        return billing.vat_of(obj.total_amount)
 
     class Meta:
         model = BillableItem
@@ -59,17 +67,80 @@ class BillableItemSerializer(serializers.ModelSerializer):
 
 
 class PaymentTransactionSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source="encounter.patient.full_name", read_only=True)
+    encounter_number = serializers.CharField(source="encounter.number", read_only=True)
+    paid_by_name = serializers.SerializerMethodField()
+
+    def get_paid_by_name(self, obj):
+        return obj.paid_by_patient.full_name if obj.paid_by_patient_id else ""
+
     class Meta:
         model = PaymentTransaction
         fields = "__all__"
-        read_only_fields = ("receipt_number", "processed_by")
+        read_only_fields = (
+            "receipt_number", "processed_by", "invoice_number", "processed_by_name", "discount_amount",
+            "discount_rule_name", "discount_reason", "forgiven_amount", "vat_amount", "paid_by_patient",
+        )
 
 
 class RefundTransactionSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source="encounter.patient.full_name", read_only=True)
+    encounter_number = serializers.CharField(source="encounter.number", read_only=True)
+
     class Meta:
         model = RefundTransaction
         fields = "__all__"
-        read_only_fields = ("processed_by",)
+        read_only_fields = ("processed_by", "processed_by_name", "rule_name")
+
+
+class PaymentRuleSerializer(serializers.ModelSerializer):
+    service_names = serializers.SerializerMethodField()
+
+    def get_service_names(self, obj):
+        if obj.all_services:
+            return ["All services"]
+        names = dict(
+            BillableService.objects.filter(pk__in=obj.service_ids or []).values_list("pk", "name")
+        )
+        return [names[i] for i in (obj.service_ids or []) if i in names]
+
+    def validate_name(self, value):
+        value = " ".join(value.split())
+        if not value:
+            raise serializers.ValidationError("Give the rule a name.")
+        return value
+
+    def validate_percent(self, value):
+        if value <= 0 or value > 100:
+            raise serializers.ValidationError("The percentage must be above 0 and at most 100.")
+        return value
+
+    def validate(self, attrs):
+        if self.instance is None and attrs.get("kind") not in ("discount", "refund"):
+            raise serializers.ValidationError({"kind": "Choose discount or refund."})
+        return attrs
+
+    class Meta:
+        model = PaymentRule
+        fields = ("id", "kind", "name", "reason", "all_services", "service_ids", "service_names", "percent")
+        extra_kwargs = {"reason": {"required": True, "allow_blank": False}}
+
+
+class ForgivenAmountSerializer(serializers.ModelSerializer):
+    patient_name = serializers.CharField(source="encounter.patient.full_name", read_only=True)
+    encounter_number = serializers.CharField(source="encounter.number", read_only=True)
+    amount_due = serializers.SerializerMethodField()
+
+    def get_amount_due(self, obj):
+        return billing.amount_due(obj.encounter)
+
+    class Meta:
+        model = ForgivenAmount
+        fields = (
+            "id", "encounter", "encounter_number", "patient_name", "amount", "amount_due", "reason", "status",
+            "requested_by_name", "decided_by_name", "decided_at", "decision_note", "created_at",
+        )
+        read_only_fields = fields
 
 
 class LabTestParameterSerializer(serializers.ModelSerializer):
@@ -207,25 +278,77 @@ class ClinicalOrderSerializer(serializers.ModelSerializer):
 
 
 class DoctorChartSerializer(serializers.ModelSerializer):
+    # The patient's allergies, written by the doctor on the chart and kept on the patient record.
+    allergies = serializers.SerializerMethodField()
+
+    def get_allergies(self, obj):
+        return obj.encounter.patient.allergies or ""
+
     class Meta:
         model = DoctorChart
         fields = "__all__"
 
 
 class NurseNoteSerializer(serializers.ModelSerializer):
+    vitals_display = serializers.SerializerMethodField()
+    assessment_label = serializers.SerializerMethodField()
+    stage_label = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
+
     class Meta:
         model = NurseNote
         fields = "__all__"
         read_only_fields = ("created_by",)
+        extra_kwargs = {"content": {"required": False, "allow_blank": True}}
+
+    def get_vitals_display(self, obj):
+        return vitals_mod.display(obj.assessment_type, obj.vitals)
+
+    def get_assessment_label(self, obj):
+        return (vitals_mod.ASSESSMENTS.get(obj.assessment_type) or {}).get("label", obj.assessment_type)
+
+    def get_stage_label(self, obj):
+        return vitals_mod.STAGES.get(obj.stage, obj.stage)
+
+    def get_created_by_name(self, obj):
+        return obj.created_by.get_username() if obj.created_by_id else ""
+
+    def validate(self, attrs):
+        inst = self.instance
+        assessment = attrs.get("assessment_type", getattr(inst, "assessment_type", vitals_mod.DEFAULT_ASSESSMENT))
+        stage = attrs.get("stage", getattr(inst, "stage", vitals_mod.DEFAULT_STAGE))
+        try:
+            if "vitals" in attrs or "assessment_type" in attrs or "stage" in attrs:
+                attrs["vitals"] = vitals_mod.clean(assessment, stage, attrs.get("vitals", getattr(inst, "vitals", {})))
+            elif assessment not in vitals_mod.ASSESSMENTS or stage not in vitals_mod.STAGES:
+                raise vitals_mod.VitalsError("Choose an assessment type and a stage.")
+        except vitals_mod.VitalsError as exc:
+            raise serializers.ValidationError({"vitals": [str(exc)]})
+        content = (attrs.get("content", getattr(inst, "content", "")) or "").strip()
+        readings = attrs.get("vitals", getattr(inst, "vitals", {})) or {}
+        if stage in vitals_mod.NOTE_REQUIRED_STAGES and not content:
+            raise serializers.ValidationError({"content": ["Write a short note before discharge."]})
+        if not content and not readings:
+            raise serializers.ValidationError({"vitals": ["Record at least one reading or write a note."]})
+        return attrs
 
 
 class AppointmentSerializer(serializers.ModelSerializer):
     patient_name = serializers.CharField(source="patient.full_name", read_only=True)
+    patient_mrn = serializers.CharField(source="patient.mrn", read_only=True)
+    patient_phone = serializers.CharField(source="patient.phone", read_only=True)
+    discount_rule_name = serializers.CharField(source="discount_rule.name", read_only=True, default="")
+    refund_rule_name = serializers.CharField(source="refund_rule.name", read_only=True, default="")
+    merged_with_name = serializers.CharField(source="merged_with.patient.full_name", read_only=True, default="")
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
 
     class Meta:
         model = Appointment
         fields = "__all__"
-        read_only_fields = ("clinic_tin", "branch_name", "created_by")
+        read_only_fields = (
+            "clinic_tin", "branch_name", "created_by", "status", "rescheduled_count", "merged_with",
+            "discount_rule", "refund_rule",
+        )
 
 
 class SupplierSerializer(serializers.ModelSerializer):
@@ -518,8 +641,14 @@ class EquipmentTicketSerializer(serializers.ModelSerializer):
 class ReferralSerializer(serializers.ModelSerializer):
     patient_name = serializers.CharField(source="encounter.patient.full_name", read_only=True)
     encounter_number = serializers.CharField(source="encounter.number", read_only=True)
+    from_branch = serializers.CharField(source="encounter.branch_name", read_only=True)
     created_by_name = serializers.SerializerMethodField()
     approved_by_name = serializers.SerializerMethodField()
+    reception_approved_by_name = serializers.SerializerMethodField()
+    results = serializers.SerializerMethodField()
+    handover = serializers.SerializerMethodField()
+    handover_text = serializers.SerializerMethodField()
+    print_blocker = serializers.SerializerMethodField()
 
     class Meta:
         model = Referral
@@ -529,7 +658,80 @@ class ReferralSerializer(serializers.ModelSerializer):
             "approval_status",
             "approved_by",
             "approved_at",
+            "reception_approved_by",
+            "reception_approved_at",
+            "printed_at",
+            "disqualified_reason",
         )
+
+    def get_reception_approved_by_name(self, obj):
+        user = obj.reception_approved_by
+        return getattr(user, "username", "") if user else ""
+
+    def get_results(self, obj):
+        """Finished lab and radiology results of the visit. Nothing is sent for a test that was not done."""
+        rows = []
+        for order in obj.encounter.orders.all():
+            if order.order_type not in ("lab", "radiology") or order.status not in ("Completed", "Reviewed"):
+                continue
+            service = order.billable.service if order.billable_id and order.billable.service_id else None
+            name = service.name if service else (order.details or "")[:80]
+            row = {"type": order.order_type, "name": name, "values": [], "summary": ""}
+            if order.order_type == "lab":
+                row["values"] = [
+                    {"name": v.name, "value": v.value, "unit": v.unit, "flag": v.flag}
+                    for v in order.result_values.all()
+                ]
+                row["summary"] = (order.result_text or "").strip()
+            else:
+                report = getattr(order, "radiology_report", None)
+                if report is not None:
+                    row["summary"] = (report.impression or report.findings or "").strip()
+                else:
+                    row["summary"] = (order.result_text or "").strip()
+            if row["values"] or row["summary"]:
+                rows.append(row)
+        return rows
+
+    def get_handover(self, obj):
+        patient = obj.encounter.patient
+        return {
+            "name": patient.full_name,
+            "age": patient.age,
+            "sex": patient.gender,
+            "phone": patient.phone,
+            "address": patient.address,
+            "diagnosis": obj.diagnosis,
+            "lab_summary": obj.lab_summary,
+            "results": self.get_results(obj),
+            "priority": obj.priority,
+            "from_branch": obj.encounter.branch_name,
+        }
+
+    def get_handover_text(self, obj):
+        h = self.get_handover(obj)
+        lines = [
+            f"Referred from {h['from_branch']}.",
+            f"Patient: {h['name']}, {h['age']} years, {h['sex']}, phone {h['phone'] or '—'}, address {h['address'] or '—'}.",
+        ]
+        if h["diagnosis"]:
+            lines.append(f"Diagnosis: {h['diagnosis']}")
+        if h["lab_summary"]:
+            lines.append(f"Lab and radiology summary: {h['lab_summary']}")
+        for r in h["results"]:
+            vals = "; ".join(f"{v['name']} {v['value']} {v['unit']}".strip() for v in r["values"])
+            lines.append(f"{r['name']}: {vals or r['summary']}")
+        return "\n".join(lines)
+
+    def get_print_blocker(self, obj):
+        """Why this referral can not be printed yet, or an empty text when it can."""
+        if obj.approval_status == Referral.APPROVAL_DISQUALIFIED:
+            return "This referral was disqualified, so it can't be printed."
+        if obj.destination_kind == Referral.KIND_INTERNAL and obj.reception_approved_at is None:
+            return "Reception must approve this referral before it is printed."
+        if obj.encounter.billables.exclude(payment_status="PaymentApproved").exists():
+            return "Every payment must be approved before the referral is printed."
+        return ""
 
     def get_created_by_name(self, obj):
         user = obj.created_by
@@ -574,6 +776,18 @@ class EncounterSerializer(serializers.ModelSerializer):
     chart = DoctorChartSerializer(read_only=True)
     nurse_notes = NurseNoteSerializer(many=True, read_only=True)
     amount_due = serializers.SerializerMethodField()
+    vat_total = serializers.SerializerMethodField()
+    discount_rule_name = serializers.CharField(source="discount_rule.name", read_only=True, default="")
+    refund_rule_name = serializers.CharField(source="refund_rule.name", read_only=True, default="")
+    referred_from_branch = serializers.CharField(source="referral_from.encounter.branch_name", read_only=True, default="")
+    forgiveness = serializers.SerializerMethodField()
+
+    def get_vat_total(self, obj):
+        return billing.vat_of(sum((i.total_amount for i in obj.billables.all()), 0))
+
+    def get_forgiveness(self, obj):
+        record = billing.open_forgiveness(obj)
+        return ForgivenAmountSerializer(record).data if record else None
 
     def get_amount_due(self, obj):
         due = 0
@@ -588,7 +802,7 @@ class EncounterSerializer(serializers.ModelSerializer):
     class Meta:
         model = Encounter
         fields = "__all__"
-        read_only_fields = ("clinic_tin", "branch_name", "number", "opened_by", "closed_at")
+        read_only_fields = ("clinic_tin", "branch_name", "number", "opened_by", "closed_at", "referral_from")
 
 
 class BillableServiceSerializer(serializers.ModelSerializer):

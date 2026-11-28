@@ -252,9 +252,10 @@ class PrescribeAndDispenseLooseTests(APITestCase):
         self.med = Medicine.objects.create(
             clinic_tin=TIN, branch_name="Main", name="Paracetamol 500mg", on_hand=5, unit_price=20,
             pack_size=10, loose_unit="tablet", loose_price=Decimal("2.50"), unit_of_measure="box",
+            min_threshold=0,  # these tests are about pricing and quantity, not the low-stock alert level
         )
         self.plain = Medicine.objects.create(
-            clinic_tin=TIN, branch_name="Main", name="Saline", on_hand=3, unit_price=40
+            clinic_tin=TIN, branch_name="Main", name="Saline", on_hand=3, unit_price=40, min_threshold=0
         )
 
     def order(self, medicine, **body):
@@ -287,9 +288,14 @@ class PrescribeAndDispenseLooseTests(APITestCase):
         self.assertEqual(self.order(self.plain, quantity=1, sale_unit="loose").status_code, 400)
         self.assertEqual(self.order(self.med, quantity=0).status_code, 400)
         self.assertEqual(self.order(self.med, quantity="abc").status_code, 400)
-        self.assertEqual(self.order(self.med, quantity=6).status_code, 400)  # only 5 packs
-        self.assertEqual(self.order(self.med, quantity=51, sale_unit="loose").status_code, 400)
         self.assertEqual(ClinicalOrder.objects.count(), 0)
+
+    def test_more_than_the_clinic_has_goes_to_an_external_pharmacy(self, _perm):
+        # 5 packs in stock and no reserve: 6 packs is 5 from the clinic and 1 outside, not an error.
+        res = self.order(self.med, quantity=6)
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual((res.data["stock_split"]["clinic_quantity"], res.data["stock_split"]["external_quantity"]), (5, 1))
+        self.assertEqual(ClinicalOrder.objects.count(), 2)
 
     def test_dispense_loose_opens_packs_and_matches_the_order(self, _perm):
         oid = self.order(self.med, quantity=12, sale_unit="loose").data["id"]

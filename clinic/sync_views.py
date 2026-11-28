@@ -120,6 +120,41 @@ def expire_stale_runs(scope):
         run.save(update_fields=["push_status", "pull_status", "error_message", "finished_at"])
 
 
+def _idle_check(scope, state, tenant):
+    """The early warning (P19): nothing to push and the due date has not arrived, so a sync is not needed yet.
+
+    Only the pushing side can be counted without contacting the cloud, so the check says what it looked at.
+    The manager can still run the sync anyway.
+    """
+    from tenants.models import TenantAccount
+
+    from .sync_engine import Scope as EngineScope
+    from .sync_engine import count_changes, delta_since
+    from .sync_gate import allowed_days
+
+    if not _is_node() or tenant is None or (getattr(tenant, "ops_mode", "") or "").lower() != TenantAccount.OPS_MODE_OFFLINE:
+        return {"applies": False, "warn_only": False}
+    last = state.last_successful_sync_at if state else None
+    allowed = allowed_days(tenant)
+    days = (timezone.now().date() - last.date()).days if last else None
+    due_reached = last is None or days >= allowed
+    pending = None
+    if state is not None and state.seeded_at and state.last_sync_token:
+        pending = count_changes(EngineScope(scope.tin, scope.branch), since=delta_since(state.last_sync_token))
+    nothing = pending == 0
+    return {
+        "applies": True,
+        "pending_push": pending,
+        "nothing_to_push": nothing,
+        "pull_checked": False,
+        "due_after_days": allowed,
+        "days_since_sync": days,
+        "next_due_in_days": None if due_reached else max(allowed - days, 0),
+        "due_reached": due_reached,
+        "warn_only": bool(nothing and not due_reached),
+    }
+
+
 class SyncStatusView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -145,6 +180,7 @@ class SyncStatusView(APIView):
                 "last_successful_sync_at": state.last_successful_sync_at if state else None,
                 "awaiting_step": awaiting_step(waiting) if waiting else None,
                 "freshness": sync_reminder(tenant, scope.branch),
+                "idle": _idle_check(scope, state, tenant),
                 "backup": backup.backup_status() if _is_node() else None,
                 "open_conflicts": SyncConflict.objects.filter(
                     clinic_tin=scope.tin, branch_name=scope.branch, resolved_at__isnull=True

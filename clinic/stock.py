@@ -61,6 +61,17 @@ def capacity(medicine, sale_unit):
     return medicine.on_hand
 
 
+def reserve(medicine, sale_unit):
+    """The low-stock alert level (the manager sets it in whole packs), counted in `sale_unit`."""
+    packs = max(0, int(medicine.min_threshold or 0))
+    return packs * pack_size(medicine) if sale_unit == LOOSE and is_splittable(medicine) else packs
+
+
+def clinic_can_supply(medicine, sale_unit):
+    """How much of an order the clinic pharmacy can fill without going below the low-stock alert level."""
+    return max(0, capacity(medicine, sale_unit) - reserve(medicine, sale_unit))
+
+
 def _plural(word, count):
     if count == 1 or word in {"ml", "dozen", "other"}:
         return word
